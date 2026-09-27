@@ -45,16 +45,19 @@ def run(out: str) -> dict:
         p.wait_for_timeout(1500)
         home = p.url
         views["dashboard"] = scan(p)
-        if st.get("serial"):
-            p.get_by_text("UAT", exact=True).first.click()
+        # Every attached Echo: a FireOS and an emOS device show different
+        # controls (debloat, console password), so one is not a sample of all.
+        for sn in st.get("serials") or []:
+            short = sn[-4:]
+            p.get_by_text(f"UAT {short}", exact=True).first.click()
             p.wait_for_timeout(1000)
             for tab in ("status", "activity", "config", "updates", "logs"):
                 try:
                     p.get_by_role("button", name=tab, exact=True).click()
                     p.wait_for_timeout(800)
-                    views[f"device/{tab}"] = scan(p)
+                    views[f"device/{short}/{tab}"] = scan(p)
                 except Exception as e:
-                    views[f"device/{tab}"] = [{"id": "uat-error", "help": str(e)[:200]}]
+                    views[f"device/{short}/{tab}"] = [{"id": "uat-error", "help": str(e)[:200]}]
             p.keyboard.press("Escape")
             p.goto(home); p.wait_for_timeout(1500)
         p.get_by_role("button", name="Settings").click()

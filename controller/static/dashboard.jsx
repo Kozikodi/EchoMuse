@@ -1956,7 +1956,12 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
         </div>
 
         {/* Body */}
-        <div className="em-modal-body" style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
+        {/* Focusable so a keyboard can scroll it: on the Logs tab it holds
+            only text, and a scroll area with nothing focusable inside cannot
+            be scrolled without a mouse (axe scrollable-region-focusable,
+            UAT 2026-09-27 — a device with enough log lines to scroll). */}
+        <div className="em-modal-body" tabIndex={0} role="region" aria-label={`${device.label || device.device_id} ${tab}`}
+             style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
 
           {/* APPROVE */}
           {!device.approved && (
