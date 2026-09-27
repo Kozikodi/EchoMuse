@@ -733,6 +733,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     asyncio.create_task(em_player.play(device_id, msg.media_url))
             elif msg.has_command and device_id is not None:
                 cmd = msg.command
+                # Logged because the sender is otherwise invisible: a pause
+                # from Music Assistant, an automation or a UI looks the same
+                # on our side, and play_media is the only command we logged.
+                _name = {api_pb2.MEDIA_PLAYER_COMMAND_PAUSE: "pause",
+                         api_pb2.MEDIA_PLAYER_COMMAND_PLAY: "play",
+                         api_pb2.MEDIA_PLAYER_COMMAND_STOP: "stop"}.get(cmd)
+                if _name:
+                    log.info(f"[{self._log_name}] media command: {_name}")
                 if cmd == api_pb2.MEDIA_PLAYER_COMMAND_PAUSE:
                     asyncio.create_task(em_player.pause(device_id))
                 elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_PLAY:

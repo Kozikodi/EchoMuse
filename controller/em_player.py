@@ -45,7 +45,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import deque
+from urllib.parse import urlsplit
 
 import em_eq
 import em_limiter
@@ -137,6 +139,29 @@ SEEK_STALL_S    = 5.0
 # 500ms is well inside the ~4s lead, so a stall this size is not yet audible —
 # which is the point of catching it here.
 SOURCE_STALL_MS = 500.0
+
+# ...but only when the source is actually BEHIND. Music Assistant hands an HA
+# player a flow stream at 1.03x real time after a 3s burst, so once the burst
+# is spent every read waits ~1s for ~1s of audio. That is a source keeping
+# pace, and warning on it logged ~60 false stalls a minute on every Music
+# Assistant stream (2026-09-27), which pointed an investigation at Apple
+# Music's rate limiter for nothing. A slow read is a stall when the feed is
+# less than this far ahead of real time when it returns.
+SOURCE_BEHIND_S = 1.0
+
+# Music Assistant's queue flow URL: /flow/<session>/<player>/<item>/<file>.
+# A flow is a live stream and cannot seek, so resuming one by seeking waited
+# out SEEK_STALL_S of silence before rejoining the live edge — 7.2s from
+# "resume the music" to sound, measured 2026-09-27. Known up front instead.
+_MA_FLOW_PATH = re.compile(r"^/flow/[^/]+/[^/]+/[^/]+/[^/]+$")
+
+
+def known_unseekable(url: str) -> bool:
+    """True for a URL we know cannot seek (a Music Assistant flow)."""
+    try:
+        return bool(_MA_FLOW_PATH.match(urlsplit(url).path))
+    except ValueError:
+        return False
 
 # How many ffmpeg stderr lines to keep for the failure log. -loglevel error
 # means anything that IS on stderr is meaningful; five lines covers every
@@ -502,7 +527,7 @@ class MediaSession:
         self.url = url
         self._pos = 0.0
         # New URL, new answer — a track file after a flow stream is seekable.
-        self._seekable = True
+        self._seekable = not known_unseekable(url)
         self._start_feed()
 
     async def pause(self) -> None:
@@ -780,11 +805,15 @@ class MediaSession:
                             t_first_pcm = loop.time()
                         if _read_ms > src_max_ms:
                             src_max_ms = _read_ms
-                        if _read_ms > SOURCE_STALL_MS:
+                        _src_ahead = (sent / BYTES_PER_SEC
+                                      - (loop.time() - seg_start))
+                        if (_read_ms > SOURCE_STALL_MS
+                                and _src_ahead < SOURCE_BEHIND_S):
                             src_stalls += 1
                             log.warning(
                                 f"[{self.device_id}] Media SOURCE stall: "
-                                f"{_read_ms:.0f}ms with no audio from the decoder "
+                                f"{_read_ms:.0f}ms with no audio from the decoder, "
+                                f"{max(_src_ahead, 0.0):.1f}s ahead of real time "
                                 f"({sent / BYTES_PER_SEC:.1f}s sent) — upstream, "
                                 f"not the device link")
                 except asyncio.IncompleteReadError as e:
@@ -863,8 +892,8 @@ class MediaSession:
                 log.info(
                     f"[{self.device_id}] Media feed done: "
                     f"{sent // SPEAKER_BYTES} periods, source max read "
-                    f"{src_max_ms:.0f}ms, {src_stalls} stall(s) over "
-                    f"{SOURCE_STALL_MS:.0f}ms, "
+                    f"{src_max_ms:.0f}ms, {src_stalls} stall(s) behind "
+                    f"real time, "
                     f"{em_eq.describe_activity(eq.limiter, eq.guard)}")
             if not eos_sent:
                 # The flush discard stays armed until it sees this stream's
