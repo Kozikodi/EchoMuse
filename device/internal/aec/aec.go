@@ -26,6 +26,7 @@ package aec
 
 #include <stdlib.h>
 #include "speex/speex_echo.h"
+#include "speex/speex_preprocess.h"
 #include "src/fftwrap.c"
 #include "src/kiss_fft.c"
 #include "src/kiss_fftr.c"
@@ -92,6 +93,14 @@ type Canceller struct {
 	count int // samples buffered
 	dsum  int32
 	dcnt  int
+
+	// Residual echo suppression (SetResidual): what the linear filter leaves
+	// — loudspeaker distortion, echo past the tail — suppressed per band.
+	// Built beside st and fed its residual estimate; nil when off.
+	pp          *C.SpeexPreprocessState
+	resOn       bool
+	resDb       int // max attenuation of residual echo, dB (negative)
+	resActiveDb int // the same while someone is talking over it
 
 	// C-side scratch buffers, allocated once per state init.
 	micBuf *C.spx_int16_t
@@ -310,7 +319,74 @@ func (c *Canceller) buildLocked() {
 	c.micBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
 	c.refBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
 	c.outBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
-	log.Printf("[aec] enabled: frame=%d tail=%dms delay=%dms", FrameSize, c.stTailMs, c.delayMs)
+	c.buildResLocked()
+	log.Printf("[aec] enabled: frame=%d tail=%dms delay=%dms res=%s", FrameSize, c.stTailMs, c.delayMs, c.resDesc())
+}
+
+// SetResidual turns residual echo suppression on or off. suppressDb is the
+// most it may take out of residual echo and activeDb the most while someone
+// is talking over it (both negative dB; speexdsp's defaults are -40/-15).
+// The learnt echo path is kept: only the suppressor is rebuilt.
+//
+// Why: the linear filter removes 12-20dB of music on this speaker (Dev Test
+// 4, 2026-09-27, 70 min), because a loudspeaker at volume distorts and a
+// linear filter cannot model that. What is left scores "hey jarvis" at
+// 0.25-0.48, above the 0.25 bar used while music plays. A residual
+// suppressor is the standard second stage (WebRTC AEC3's suppressor,
+// speexdsp's own preprocessor). Its known cost is near-end speech: on
+// 2026-09-22 AEC3's suppressor cut wake words over a reply, so activeDb is
+// what keeps a person talking over the music detectable.
+func (c *Canceller) SetResidual(on bool, suppressDb, activeDb int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if on == c.resOn && suppressDb == c.resDb && activeDb == c.resActiveDb {
+		return
+	}
+	c.resOn, c.resDb, c.resActiveDb = on, suppressDb, activeDb
+	if c.st != nil {
+		c.buildResLocked()
+		log.Printf("[aec] residual echo suppression: %s", c.resDesc())
+	}
+}
+
+func (c *Canceller) resDesc() string {
+	if !c.resOn {
+		return "off"
+	}
+	return fmt.Sprintf("%d/%ddB", c.resDb, c.resActiveDb)
+}
+
+// buildResLocked (re)creates the suppressor for the current echo state.
+//
+// Denoise stays ENABLED with its strength at 0dB, and that is not optional:
+// speexdsp computes the echo gains inside the denoiser and, with denoise off,
+// replaces every gain with unity before applying them (preprocess.c, "If
+// noise suppression is off, don't apply the gain") — echo suppression
+// included. At 0dB the noise floor is unity, so noise is never attenuated
+// and only bands the echo estimate says are echo are pulled down. AGC, VAD
+// and dereverb are off: the mic path has its own AGC and noise suppression
+// downstream, and running them twice would be a change nobody asked for.
+func (c *Canceller) buildResLocked() {
+	if c.pp != nil {
+		C.speex_preprocess_state_destroy(c.pp)
+		c.pp = nil
+	}
+	if !c.resOn || c.st == nil {
+		return
+	}
+	c.pp = C.speex_preprocess_state_init(C.int(FrameSize), C.int(sampleRate))
+	set := func(req C.int, v int) {
+		x := C.spx_int32_t(v)
+		C.speex_preprocess_ctl(c.pp, req, unsafe.Pointer(&x))
+	}
+	set(C.SPEEX_PREPROCESS_SET_DENOISE, 1)
+	set(C.SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, 0)
+	set(C.SPEEX_PREPROCESS_SET_AGC, 0)
+	set(C.SPEEX_PREPROCESS_SET_VAD, 0)
+	set(C.SPEEX_PREPROCESS_SET_DEREVERB, 0)
+	set(C.SPEEX_PREPROCESS_SET_ECHO_SUPPRESS, c.resDb)
+	set(C.SPEEX_PREPROCESS_SET_ECHO_SUPPRESS_ACTIVE, c.resActiveDb)
+	C.speex_preprocess_ctl(c.pp, C.SPEEX_PREPROCESS_SET_ECHO_STATE, unsafe.Pointer(c.st))
 }
 
 // seedRingLocked seeds the ring with the bulk delay as silence: the mic
@@ -326,6 +402,10 @@ func (c *Canceller) seedRingLocked() {
 }
 
 func (c *Canceller) freeLocked() {
+	if c.pp != nil {
+		C.speex_preprocess_state_destroy(c.pp)
+		c.pp = nil
+	}
 	if c.st != nil {
 		C.speex_echo_state_destroy(c.st)
 		c.st = nil
@@ -503,6 +583,9 @@ func (c *Canceller) process(mono, hwref []byte) []byte {
 		}
 
 		C.speex_echo_cancellation(c.st, c.micBuf, c.refBuf, c.outBuf)
+		if c.pp != nil {
+			C.speex_preprocess_run(c.pp, c.outBuf)
+		}
 		for i := 0; i < FrameSize; i++ {
 			binary.LittleEndian.PutUint16(out[off+i*2:], uint16(res[i]))
 		}

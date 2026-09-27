@@ -41,6 +41,8 @@ func main() {
 	gainDb := flag.Float64("gain", 24, "mic gain, dB (micGainDb)")
 	load := flag.String("load", "", "start from a saved echo path (aec.ExportState) instead of cold")
 	save := flag.String("save", "", "write the echo path learnt by the end of this run")
+	res := flag.Int("res", 0, "residual echo suppression, max dB (e.g. -40); 0 = off")
+	resActive := flag.Int("res-active", -15, "residual echo suppression while the near end talks, dB")
 	prime := flag.Bool("prime", false, "converge on one full pass first and write the second as speex_primed.wav: the ceiling, not a real run")
 	flag.Parse()
 	if *in == "" || *out == "" {
@@ -58,6 +60,9 @@ func main() {
 	bf := beamformer.New()
 	c := aec.New()
 	c.SetParams(true, 0, *tail)
+	if *res != 0 {
+		c.SetResidual(true, *res, *resActive)
+	}
 	c.SetHardwareRef(true)
 	c.SetPlaybackLevel(*level)
 	gain := math.Pow(10, *gainDb/20)
