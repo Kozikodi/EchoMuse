@@ -292,11 +292,15 @@ func main() {
 	// coming down, or a shell session (the console, OTA and asset pushes).
 	// Polled rather than signalled at each edge: the answer is recomputed from
 	// live state every tick, so no missed "done" can leave the proxy silent.
+	// Music gets bursts rather than a yield (bluetooth.MusicDuty).
 	go func() {
 		t := time.NewTicker(100 * time.Millisecond)
 		defer t.Stop()
-		for range t.C {
-			bleScanner.Yield(dataClient.TurnStreamActive() ||
+		duty := bluetooth.NewMusicDuty()
+		for now := range t.C {
+			music := duty.Yield(now, pcmSpeaker.MusicArriving(), pcmSpeaker.MusicLead())
+			bleScanner.Yield(music ||
+				dataClient.TurnStreamActive() ||
 				dataClient.ListenOpen() ||
 				pcmSpeaker.VoiceArriving() ||
 				controlClient.ShellActive())

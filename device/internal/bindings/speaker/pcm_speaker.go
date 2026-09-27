@@ -588,10 +588,21 @@ func (p *PcmSpeaker) VoiceAudible(hold time.Duration) bool {
 
 // VoiceArriving reports whether a voice reply is still arriving on the wire —
 // the part of playback that needs the link, as against playing out of the
-// buffer. The BLE scanner yields for it (bluetooth.Scanner.Yield). Music is
-// left out: it streams for hours, and yielding for it would starve Bermuda.
+// buffer. The BLE scanner yields for it (bluetooth.Scanner.Yield). Music
+// gets a duty cycle instead (bluetooth.MusicDuty): it streams for hours, and
+// yielding for all of it would starve Bermuda.
 func (p *PcmSpeaker) VoiceArriving() bool {
 	return p.voice.arriving(time.Now(), 2*time.Second)
+}
+
+// MusicArriving is VoiceArriving for the music plane.
+func (p *PcmSpeaker) MusicArriving() bool {
+	return p.music.arriving(time.Now(), 2*time.Second)
+}
+
+// MusicLead is how much music is buffered and not yet played.
+func (p *PcmSpeaker) MusicLead() time.Duration {
+	return time.Duration(len(p.music.ch)) * periodSize * time.Second / 48000
 }
 
 // MusicAudible is VoiceAudible for the music plane.
