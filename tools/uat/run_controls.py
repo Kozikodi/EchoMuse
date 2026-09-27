@@ -143,6 +143,15 @@ class Page:
 
     def save(self):
         self.page.get_by_role("button", name="Save & push to fleet").click()
+        # Wait for the reply before the next edit. Switching the Bluetooth
+        # proxy on holds it ~1s per Echo, and an edit made meanwhile was
+        # marked saved without being sent (found this way; fixed in #676).
+        saving = self.page.get_by_role("button", name="Saving…")
+        try:
+            saving.wait_for(state="visible", timeout=1500)
+        except Exception:
+            pass    # already done: a fast save never shows it
+        saving.wait_for(state="detached", timeout=60000)
         self.page.wait_for_timeout(1500)
 
     def shot(self, path):
