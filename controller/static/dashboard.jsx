@@ -63,16 +63,15 @@ function webUsbBlocked() {
   const origin = window.location.origin;
   return {
     origin,
-    why: `WebUSB needs a secure context, and this page is on ${origin}.`,
+    why: `USB is blocked: ${origin} is not a secure address.`,
     // Under the add-on there is no localhost route to offer:
     // _ingress_only_middleware rejects anything that is not the Supervisor
     // gateway, so suggesting a direct port would send the user to a 403.
     fix: isIngress()
-      ? `Serve Home Assistant over HTTPS, or add exactly ${origin} to `
+      ? `Serve Home Assistant over HTTPS, or allow ${origin} at `
         + `chrome://flags/#unsafely-treat-insecure-origin-as-secure and relaunch `
-        + `the browser. An allowlist entry for the controller's own address does `
-        + `not cover this one.`
-      : `Open the dashboard at http://localhost:8768, or add exactly ${origin} to `
+        + `the browser. The controller's own address does not cover this one.`
+      : `Use http://localhost:8768 on this computer, or allow ${origin} at `
         + `chrome://flags/#unsafely-treat-insecure-origin-as-secure and relaunch `
         + `the browser.`,
   };
@@ -8199,12 +8198,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 code. */}
             {step === 0 && usbBlocked && (
               <div className="em-panel" style={{ marginBottom: 12, borderColor: 'var(--warn)' }}>
-                <div className="em-label" style={{ marginBottom: 6 }}>USB is unavailable in this browser</div>
-                <p style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.6, margin: '0 0 6px' }}>
-                  {usbBlocked.why}
-                </p>
                 <p style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.6, margin: 0 }}>
-                  {usbBlocked.fix}
+                  <strong>{usbBlocked.why}</strong> {usbBlocked.fix}
                 </p>
               </div>
             )}
@@ -8441,48 +8436,36 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {isEmos && step === 7 && stepState[7] !== 'done' && !running && (
               <div className="em-panel" style={{ marginBottom: 12, borderColor: 'var(--warn)' }}>
                 <div className="em-label" style={{ marginBottom: 6 }}>What you do</div>
-                {/* The ring guide below is what this panel has always said, and
-                    it is the right content — but it describes what the DEVICE
-                    does and never said what the operator does, so the port
-                    picker arrived unannounced. That is the step people get
-                    stuck on. */}
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7, marginBottom: 14 }}>
-                  <div>1. Click the button below these steps. The device reboots into emOS.</div>
-                  <div>2. The browser asks for a serial port. It appears as <strong>emOS</strong>,
-                       and only once the emOS boot starts — the ring beginning to fill. Leave the
-                       picker open and it turns up by itself; if the picker gives up first, click
-                       Connect Console again.</div>
-                  <div>3. Pick it. The wizard reads the console itself from there.</div>
-                  <div>Leave the cable in throughout — it is the device&apos;s only power.</div>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7, marginBottom: 10 }}>
+                  <div>1. Click the button. The Echo reboots into emOS.</div>
+                  <div>2. Pick <strong>emOS</strong> when the browser asks for a serial port. It appears once the ring starts filling.</div>
+                  <div>Keep the cable in: it powers the Echo.</div>
                 </div>
                 <div style={{ marginBottom: 14 }}>
-                  {/* Once the reboot has been sent there is no ADB handle and
+                  {/* After the reboot there is no ADB handle and
                       runRebootAndWatch skips it, so a second click only opens
-                      the port picker — say so. The picker times out if emOS
-                      takes longer to appear than the operator waits. Here,
-                      straight after the steps that name it, rather than
-                      under the ring guide, where it sat at the panel's
-                      clipped edge. */}
+                      the port picker, which times out if emOS is slow. */}
                   <Pill accent onClick={() => runStep(7)}>{adb ? 'Reboot and Connect Console' : 'Connect Console'}</Pill>
                 </div>
-                <div className="em-label" style={{ marginBottom: 6 }}>Watch the light ring on this boot</div>
+                <div className="em-label" style={{ marginBottom: 6 }}>The ring</div>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7 }}>
-                  <div><strong>A blue arc growing behind a cyan head</strong> — booting. The head travels right round and finishes back at the bottom.</div>
-                  <div><strong>Two segments either side of the bottom, throbbing blue</strong> — every boot stage done, waiting for WiFi. This is where it sits for the whole of the next step, and it will sit there indefinitely until you configure a network. Normal.</div>
-                  <div><strong style={{ color: 'var(--ok)' }}>Both sides filling to the top, then white, then fading</strong> — on the network, ring handed over to EchoMuse. Done.</div>
-                  <div><strong style={{ color: 'var(--warn)' }}>Solid amber</strong> — the device is restoring its own last good image. Leave it alone; it reboots itself.</div>
-                  <div><strong style={{ color: 'var(--warn)' }}>Red and stopped</strong> — a boot stage failed at the point the head reached. Recoverable, see below.</div>
-                  <div><strong style={{ color: 'var(--error)' }}>A single segment orbiting a full blue ring, for more than a minute</strong> — emOS never started. This is the one that needs you.</div>
+                  <div><strong>Blue arc growing</strong> — booting.</div>
+                  <div><strong>Two blue segments throbbing at the bottom</strong> — booted, waiting for WiFi (next step).</div>
+                  <div><strong style={{ color: 'var(--ok)' }}>Filling to the top, then white</strong> — on the network. Done.</div>
+                  <div><strong style={{ color: 'var(--warn)' }}>Solid amber</strong> — restoring its last good image. Leave it.</div>
+                  <div><strong style={{ color: 'var(--warn)' }}>Red, stopped</strong> — a boot stage failed. Recoverable, below.</div>
+                  <div><strong style={{ color: 'var(--error)' }}>One segment orbiting a full blue ring for over a minute</strong> — emOS never started. Needs you, below.</div>
                 </div>
+                {/* Kept whatever it costs in length: it asks somebody to act
+                    on their own hardware, and the wrong reaction (power
+                    cycling) is what makes a recoverable Echo unrecoverable. */}
                 <p style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7, margin: '10px 0 0' }}>
-                  <strong>If it does not come up, do not keep power cycling it.</strong> To reach
-                  TWRP: unplug the power, hold <strong>mute</strong> or <strong>+</strong> (volume
-                  up), and apply power with it still held until the ring changes. Which button
-                  depends on your amonet version — <a href="https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/" target="_blank"
-                  rel="noreferrer">R0rt1z2&apos;s XDA thread</a> has it. Reconnect here and use
-                  <strong> Restore escrowed boot image</strong> below: about ten seconds, and it
-                  leaves everything on /data alone. Repeatedly power cycling a device that will
-                  not boot is what turns a recoverable one into a case-opening job.
+                  <strong>If it does not come up, do not keep power cycling it</strong> — that turns a
+                  recoverable Echo into a case-opening job. Instead: unplug it, hold <strong>mute</strong> or{' '}
+                  <strong>+</strong> (<a href="https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/" target="_blank"
+                  rel="noreferrer">which one depends on your amonet version</a>) and plug it back in to
+                  reach TWRP, reconnect here and use <strong>Restore escrowed boot image</strong>. About
+                  ten seconds, and /data is untouched.
                 </p>
               </div>
             )}
@@ -8996,18 +8979,18 @@ function listenStatusText(listen) {
   }
 }
 
-// The fleet line: how many connected Echoes send audio all the time. Counts
-// only what Echoes have reported, and says so when some have not.
+// The fleet line: shown only when a connected Echo streams all the time, or
+// has not said whether it does — never a line announcing that none do (Wil,
+// 2026-09-27: too verbose). Counts only what Echoes have reported, so an
+// unknown is never folded into private.
 function listenFleetText(devices) {
   const live = devices.filter(d => d.connected && d.listen);
-  if (!live.length) return null;
   const streaming = live.filter(d => d.listen.streams === true).length;
   const unknown = live.filter(d => d.listen.streams === null).length;
-  const n = live.length;
-  const head = streaming === 0
-    ? `No Echo streams audio continuously (${n} connected)`
-    : `${streaming} of ${n} connected Echo${n === 1 ? '' : 'es'} stream${streaming === 1 ? 's' : ''} audio continuously`;
-  return unknown ? `${head} · ${unknown} not reported yet` : head;
+  const parts = [];
+  if (streaming) parts.push(`${streaming} of ${live.length} Echo${live.length === 1 ? '' : 'es'} stream${streaming === 1 ? 's' : ''} all the time`);
+  if (unknown) parts.push(`${unknown} not reported yet`);
+  return parts.length ? parts.join(' · ') : null;
 }
 
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
@@ -9923,7 +9906,15 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
     setBundling(false);
   }
 
-  function setConf(k, v) { setConfig(c => ({ ...c, [k]: v })); setDirty(true); setSaveMsg(null); }
+  // Edits made while a save is in flight: the save's reply must not mark
+  // them saved. Switching the Bluetooth proxy on holds the reply for about a
+  // second per Echo while the proxies start, and a change made in that window
+  // was shown as saved and never sent (UAT 2026-09-27).
+  const editedDuringSave = useRef(false);
+  function setConf(k, v) {
+    setConfig(c => ({ ...c, [k]: v })); setDirty(true); setSaveMsg(null);
+    editedDuringSave.current = true;
+  }
 
   // Inline, non-blocking save feedback — was a browser alert(), which
   // demanded a click to dismiss for what is a routine success message.
@@ -9931,10 +9922,11 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
 
   async function saveGlobalConfig() {
     setSaving(true);
+    editedDuringSave.current = false;
     try {
       const res = await API.post('/api/global/config', config);
       onGlobalConfigChange(config);
-      setDirty(false);
+      setDirty(editedDuringSave.current);
       const n = res.pushed_to?.length ?? 0;
       setSaveMsg({ ok: true, text: n > 0
         ? `Saved — pushed live to ${n} device${n === 1 ? '' : 's'} on fleet config`
