@@ -857,9 +857,20 @@ Why this shape: Bermuda (source, 2026-07) re-decides areas every 1.05s,
 refuses adverts older than 10s for an area contest and calls a device away
 after 30s, and even a continuous scan gave nearby devices a fresh advert in
 only 35-77% of its cycles. A voice turn's few seconds fit that; music does
-not (hours), so music does NOT yield, and a controller-scoring device's
-always-on stream does not count as a turn. Remaining idle loss (pings,
-keepalives) is for TCP tolerance to absorb, not the scanner.
+not (hours), so music gets BURSTS instead of a yield (`bluetooth.MusicDuty`,
+2026-09-27): 2s of scan every 7s, and none while less than 2.5s of music is
+buffered. The 7s cycle sits inside Bermuda's 10s area age for any device that
+advertises within the 2s burst. Scanning straight through music was the
+earlier rule and it failed: on VVV with Music Assistant, 23 RTT excursions
+over 250ms in 2.7 min (worst 2.1s) and 15+ audible dropouts, none with the
+proxy off. Music Assistant hands an HA media player a flow stream at 1.03x
+real time after a 3s burst, so the buffer never holds more than ~5s and cannot
+ride out a 2s stall. **Known gap:** the controller paces music from a clock
+estimate, not from the device's buffer, so after a real dropout the buffer
+stays low for the rest of that stream and the 2.5s floor keeps the scan off
+until it ends. The fix is a device-reported buffer level. A controller-scoring
+device's always-on stream does not count as a turn. Remaining idle loss
+(pings, keepalives) is for TCP tolerance to absorb, not the scanner.
 
 **The mechanism was our own traffic on the liveness channel.**
 `SendBleAdverts` wrote to the CONTROL WebSocket through `writeJSON`, which
