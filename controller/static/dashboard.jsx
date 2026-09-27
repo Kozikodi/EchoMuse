@@ -8163,6 +8163,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
           {/* Content */}
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', padding: '18px 22px 14px' }}>
 
+            {/* The step's own content SCROLLS, and the transcript below keeps
+                a floor. Both used to sit in one clipped column of fixed
+                height, so a tall step pushed its own button off the bottom:
+                the WebUSB warning on step 0 and the first-boot guide on the
+                emOS console step each left the button barely clickable (UAT
+                2026-09-27). */}
+            <div style={{ flex: '0 1 auto', minHeight: 0, overflowY: 'auto' }}>
+
             {/* Step title + desc */}
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
@@ -8439,13 +8447,23 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                     picker arrived unannounced. That is the step people get
                     stuck on. */}
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7, marginBottom: 14 }}>
-                  <div>1. Click the button below. The device reboots into emOS.</div>
+                  <div>1. Click the button below these steps. The device reboots into emOS.</div>
                   <div>2. The browser asks for a serial port. It appears as <strong>emOS</strong>,
                        and only once the emOS boot starts — the ring beginning to fill. Leave the
                        picker open and it turns up by itself; if the picker gives up first, click
                        Connect Console again.</div>
                   <div>3. Pick it. The wizard reads the console itself from there.</div>
                   <div>Leave the cable in throughout — it is the device&apos;s only power.</div>
+                </div>
+                <div style={{ marginBottom: 14 }}>
+                  {/* Once the reboot has been sent there is no ADB handle and
+                      runRebootAndWatch skips it, so a second click only opens
+                      the port picker — say so. The picker times out if emOS
+                      takes longer to appear than the operator waits. Here,
+                      straight after the steps that name it, rather than
+                      under the ring guide, where it sat at the panel's
+                      clipped edge. */}
+                  <Pill accent onClick={() => runStep(7)}>{adb ? 'Reboot and Connect Console' : 'Connect Console'}</Pill>
                 </div>
                 <div className="em-label" style={{ marginBottom: 6 }}>Watch the light ring on this boot</div>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7 }}>
@@ -8466,13 +8484,6 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   leaves everything on /data alone. Repeatedly power cycling a device that will
                   not boot is what turns a recoverable one into a case-opening job.
                 </p>
-                <div style={{ marginTop: 12 }}>
-                  {/* Once the reboot has been sent there is no ADB handle and
-                      runRebootAndWatch skips it, so a second click only opens
-                      the port picker — say so. The picker times out if emOS
-                      takes longer to appear than the operator waits. */}
-                  <Pill accent onClick={() => runStep(7)}>{adb ? 'Reboot and Connect Console' : 'Connect Console'}</Pill>
-                </div>
               </div>
             )}
             {isEmos && step === 8 && stepState[8] !== 'done' && !running && (
@@ -8594,6 +8605,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
+            </div>
+
             {/* Log output — same console treatment as the Updates tab.
                 The copy action matters more than it looks: this transcript is
                 the entire record of a provision, and it is what gets pasted
@@ -8615,7 +8628,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             <div
               ref={logRef}
               className="em-console"
-              style={{ flex: 1, minHeight: 0, marginTop: 10 }}
+              style={{ flex: '1 0 120px', minHeight: 120, marginTop: 10 }}
             >
               {log.length === 0
                 ? <span style={{ color: 'var(--lcd-dim)' }}>— no output yet —</span>
