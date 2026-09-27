@@ -51,6 +51,23 @@ def _row_result(r: dict, echoes: dict) -> str:
     return min(real, key=ORDER.index) if real else r["result"]
 
 
+# For readers who have never met UAT: every report opens with it (Wil,
+# 2026-09-27).
+ABOUT = [
+    "## About this report", "",
+    "**What:** user acceptance testing (UAT) is the last check before a release: "
+    "does the software do what it says, on real hardware, the way someone would use "
+    "it. Automated tests check the code; this checks the product.", "",
+    "**Why:** settings that saved and then did nothing have shipped before. Every "
+    "EchoMuse release now gets this pass, and the report ships with it.", "",
+    "**How:** a script drives the dashboard in a browser and changes every setting, "
+    "then reads each Echo to confirm it received and applied the change, and puts it "
+    "back. An accessibility scanner checks every screen. A person then works through "
+    "voice, music, buttons and pairing with the Echoes in front of them, while the "
+    "logs are watched.", "",
+]
+
+
 def build(version: str, controls: dict, a11y: dict, human: dict | None) -> str:
     rows = controls["controls"]
     echoes = controls.get("echoes") or {controls.get("serial"): "emos"}
@@ -62,6 +79,7 @@ def build(version: str, controls: dict, a11y: dict, human: dict | None) -> str:
     views = a11y["views"]
     dirty = {v: i for v, i in views.items() if i}
     out = [f"# UAT — {version}", ""]
+    out += ABOUT
 
     verdict = "PASS" if not fails and not dirty else "ISSUES"
     where = (f"{len(echoes)} real Echoes" if len(echoes) > 1 else "a real Echo")
