@@ -28,16 +28,24 @@ def test_our_own_zero_is_not_a_volume_to_keep():
     # would make 0 the startup volume and lose the level unmute restores.
     m = OutputMute()
     m.mute(90)
-    assert m.device_report(0) is False
+    assert m.device_report(0) == (False, None)
     assert m.muted and m.restore_level == 90
 
 
-def test_the_echos_buttons_unmute():
+def test_volume_up_on_the_echo_unmutes_one_step_above_the_old_level():
+    # UAT 2026-09-27: the device stepped up from 0 to its button floor (47)
+    # and that replaced the stored volume. It should come back above 102.
     m = OutputMute()
-    m.mute(90)
-    assert m.device_report(51) is True
+    m.mute(102)
+    assert m.device_report(47) == (False, 110)
     assert not m.muted
     assert m.unmute() is None
+
+
+def test_volume_up_restore_is_capped_at_unity():
+    m = OutputMute()
+    m.mute(124)
+    assert m.device_report(47) == (False, 127)
 
 
 def test_a_volume_from_ha_unmutes():
@@ -50,8 +58,8 @@ def test_a_volume_from_ha_unmutes():
 
 def test_reports_while_unmuted_are_always_kept():
     m = OutputMute()
-    assert m.device_report(0) is True, "volume 0 set on purpose is a real volume"
-    assert m.device_report(85) is True
+    assert m.device_report(0) == (True, None), "volume 0 set on purpose is a real volume"
+    assert m.device_report(85) == (True, None)
 
 
 def test_a_reconnect_reapplies_the_mute():

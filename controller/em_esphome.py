@@ -3423,12 +3423,12 @@ def update_ambient_lux(device_id: str, lux) -> None:
     ))
 
 
-def output_mute_report(device_id: str, level: int) -> bool:
-    """Whether a device volume report is a real volume (see
-    em_output_mute.device_report). True when no server exists."""
+def output_mute_report(device_id: str, level: int) -> tuple[bool, int | None]:
+    """(keep, send) for a device volume report (see
+    em_output_mute.device_report). (True, None) when no server exists."""
     server = _servers.get(device_id)
     if server is None:
-        return True
+        return True, None
     return server.output_mute.device_report(level)
 
 

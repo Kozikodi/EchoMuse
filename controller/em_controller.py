@@ -4506,7 +4506,13 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         # Convert to HA float, update in-memory state, persist to
                         # config so the value survives controller and device restarts.
                         raw_level = int(msg.get("level", 85))
-                        if esphome.output_mute_report(device_id, raw_level):
+                        _keep, _send = esphome.output_mute_report(device_id, raw_level)
+                        if _send is not None:
+                            # Volume-up while muted: restore above the old
+                            # level; the device reports it back, and that
+                            # report is the one kept.
+                            await device.send_control({"type": "volume_set", "level": _send})
+                        if _keep:
                             device.volume = _device_level_to_ha(raw_level)
                             log.debug(
                                 f"[{device_id}] volume_state: level={raw_level} "

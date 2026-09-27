@@ -20,6 +20,12 @@ told to.
 """
 
 
+# One press of the Echo's volume-up button, in device levels (4dB; volumeStep
+# in device/internal/server/volume.go).
+BUTTON_STEP = 8
+DEVICE_MAX = 127
+
+
 class OutputMute:
     def __init__(self):
         self.muted = False
@@ -46,22 +52,32 @@ class OutputMute:
         self.muted = False
         self._restore = None
 
-    def device_report(self, level: int) -> bool:
+    def device_report(self, level: int) -> tuple[bool, int | None]:
         """
-        The device reported its level. True when it is a real volume to keep
-        (persist as startupVolume and show HA); False when it is our own mute
-        echoing back, which must not overwrite the level unmute restores.
+        The device reported its level. Returns (keep, send):
 
-        A non-zero level while muted is someone pressing the Echo's volume
-        buttons, and that unmutes.
+        keep: a real volume to keep (persist as startupVolume, show HA).
+              False for our own mute echoing back as 0, which must not
+              overwrite the level unmute restores.
+        send: a level to send instead, or None.
+
+        A non-zero level while muted is the Echo's volume-up button. The
+        device stepped up from the 0 we sent, which lands on its button
+        floor (47, near silent) — not what a volume-up on a muted player
+        means. So it unmutes one step above the level from before the mute
+        (UAT 2026-09-27: it came back at 37%, and 47 replaced the stored
+        volume). Volume-down from 0 stays 0 and stays muted.
         """
         if not self.muted:
-            return True
+            return True, None
         if int(level) == 0:
-            return False
+            return False, None
+        restore = self._restore
         self.muted = False
         self._restore = None
-        return True
+        if restore is None:
+            return True, None
+        return False, min(DEVICE_MAX, restore + BUTTON_STEP)
 
     def on_reconnect(self) -> int | None:
         """Level to send after the device reconnects: it boots at its stored
