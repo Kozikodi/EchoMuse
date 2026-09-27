@@ -1,5 +1,43 @@
 # Changelog
 
+## 2.25.0-ea.1 (Early Access)
+
+**Pairing replaces the Secure link button.** Hold an Echo's action button for
+5 seconds and approve it on the dashboard; it gets its link credentials. Once an
+Echo has used them, a connection without them is refused. A refused Echo shows
+orange with alternating lights: hold the button and approve it again. The hold
+needs firmware v2.17.0-ea.1; older firmware is approved from the dashboard.
+
+**Music keeps playing with the Bluetooth proxy on.** The proxy's scan stalled
+the Echo's WiFi and music dropped out. It now scans in short bursts while music
+plays, and Bermuda still sees your devices. Needs firmware v2.17.0-ea.1.
+
+**Home Assistant's mute button works.** Mute silences the Echo and unmute brings
+the volume back. Volume up on the Echo while muted unmutes a step above where it
+was.
+
+**Music Assistant resumes in about 2 seconds**, down from 7.
+
+**On FireOS 6 kernels the mute light stays in step with the mute**, including
+after a reboot.
+
+**Early Access firmware.** An Early Access controller offers Early Access
+firmware (vX.Y.Z-ea.N). A GA controller never offers it.
+
+Also: the controller no longer waits on database writes; a setting changed
+while a save is still going is no longer lost; the provisioning wizard's
+buttons stay on screen.
+
+Known issues: music can drop out when a voice turn ducks it (the fix is in the
+next Early Access); "hey jarvis" wakes falsely over music; re-running the
+wizard to upgrade emOS also reinstalls GA firmware.
+
+**This release migrates the database (schema v27).** A backup is written beside
+it first. An older controller will not start on the migrated database, so going
+back means restoring that backup.
+
+Tested on three Echoes before release: [UAT report](https://github.com/wilbowes/EchoMuse/blob/main/docs/uat-results/2.25.0-ea.1.md).
+
 ## 2.24.1
 
 **Re-provision a device without losing it.** The wizard recognised a device the

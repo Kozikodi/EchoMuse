@@ -64,7 +64,8 @@ def build(version: str, controls: dict, a11y: dict, human: dict | None) -> str:
     out = [f"# UAT — {version}", ""]
 
     verdict = "PASS" if not fails and not dirty else "ISSUES"
-    out += [f"**{verdict}.** {len(rows)} dashboard controls checked on a real Echo: "
+    where = (f"{len(echoes)} real Echoes" if len(echoes) > 1 else "a real Echo")
+    out += [f"**{verdict}.** {len(rows)} dashboard controls checked on {where}: "
             + ", ".join(f"{n[k]} {k}" for k in ORDER if n[k]) + ". "
             + (f"Accessibility: {len(views)} views, all clean (WCAG 2.1 AA, automated)."
                if not dirty else f"Accessibility: {len(dirty)} of {len(views)} views with issues."),
