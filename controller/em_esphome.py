@@ -95,6 +95,7 @@ import em_tasks
 import em_timers
 import em_turnclock
 import em_volume
+import em_output_mute
 
 # ── VAD sentinels ──────────────────────────────────────────────────────────────
 # Queue items marking end-of-speech in mic_queue/voice_queue, in place of
@@ -542,11 +543,35 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         return flags
 
     @property
+    def _current_muted(self) -> bool:
+        """Output mute as HA should see it (em_output_mute)."""
+        if self._owning_server is not None:
+            return self._owning_server.output_mute.muted
+        return False
+
+    @property
     def _current_volume(self) -> float:
         """Current volume as HA float (0.0–1.0), read from owning server."""
         if self._owning_server is not None:
             return self._owning_server.volume
         return 1.0
+
+    def _apply_output_mute(self, mute: bool) -> None:
+        """HA's mute/unmute: send the level em_output_mute decides."""
+        server = self._owning_server
+        if server is None:
+            return
+        om = server.output_mute
+        level = (om.mute(em_volume.ha_volume_to_device(server.volume))
+                 if mute else om.unmute())
+        log.info(f"[{self._log_name}] output {'mute' if mute else 'unmute'}"
+                 f"{'' if level is None else f' → level {level}'}")
+        if level is None:
+            return
+        if server._send_volume_set is not None:
+            em_tasks.spawn(server._send_volume_set(level))
+        else:
+            log.warning(f"[{self._log_name}] mute requested but device not connected")
 
     def handle_message(self, msg):
         """
@@ -713,6 +738,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # ceiling is the codec's unity gain, above which the DAC
                 # clips (see em_volume's docstring).
                 level = em_volume.ha_volume_to_device(msg.volume)
+                self._owning_server.output_mute.volume_set(level)
                 log.debug(
                     f"[{self._log_name}] MediaPlayerCommandRequest: "
                     f"volume={msg.volume:.3f} → level={level}"
@@ -742,7 +768,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                          api_pb2.MEDIA_PLAYER_COMMAND_STOP: "stop"}.get(cmd)
                 if _name:
                     log.info(f"[{self._log_name}] media command: {_name}")
-                if cmd == api_pb2.MEDIA_PLAYER_COMMAND_PAUSE:
+                if cmd in (api_pb2.MEDIA_PLAYER_COMMAND_MUTE,
+                           api_pb2.MEDIA_PLAYER_COMMAND_UNMUTE):
+                    self._apply_output_mute(cmd == api_pb2.MEDIA_PLAYER_COMMAND_MUTE)
+                elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_PAUSE:
                     em_tasks.spawn(em_player.pause(device_id))
                 elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_PLAY:
                     em_tasks.spawn(em_player.resume(device_id))
@@ -760,7 +789,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     key=MEDIA_PLAYER_KEY,
                     state=MediaPlayerState.PLAYING,
                     volume=self._current_volume,
-                    muted=False,
+                    muted=self._current_muted,
                 )
             else:
                 yield self._media_state_msg()
@@ -879,7 +908,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 key=MEDIA_PLAYER_KEY,
                 state=MediaPlayerState.PLAYING,
                 volume=self._current_volume,
-                muted=False,
+                muted=self._current_muted,
             )
             return
 
@@ -1141,7 +1170,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             key=MEDIA_PLAYER_KEY,
             state=st,
             volume=self._current_volume,
-            muted=False,
+            muted=self._current_muted,
         )
 
     def _announce_play_cb(self):
@@ -2412,6 +2441,9 @@ class DeviceESPhomeServer:
         # every volume_state message from the device. Read by the satellite
         # for MediaPlayerStateResponse rather than hardcoding 1.0.
         self.volume: float = 1.0
+        # HA's output mute; lives on the server so it survives the device
+        # reconnecting, which is exactly when it has to be re-applied.
+        self.output_mute = em_output_mute.OutputMute()
         # Injected by device_connected() — async callable(pcm_bytes) for
         # standalone announce playback (setup wizard, push TTS) when no
         # voice turn is active.
@@ -3389,6 +3421,21 @@ def update_ambient_lux(device_id: str, lux) -> None:
         state=float(lux) if lux is not None else 0.0,
         missing_state=lux is None,
     ))
+
+
+def output_mute_report(device_id: str, level: int) -> bool:
+    """Whether a device volume report is a real volume (see
+    em_output_mute.device_report). True when no server exists."""
+    server = _servers.get(device_id)
+    if server is None:
+        return True
+    return server.output_mute.device_report(level)
+
+
+def output_mute_on_reconnect(device_id: str) -> int | None:
+    """Level to re-send after a reconnect while output-muted, else None."""
+    server = _servers.get(device_id)
+    return server.output_mute.on_reconnect() if server is not None else None
 
 
 def update_device_volume(device_id: str, volume: float) -> None:

@@ -4397,6 +4397,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             stop_alarm=_stop_alarm,
             start_conversation=_start_conversation,
         )
+        # A device boots at its stored startupVolume, which an output mute
+        # never overwrites — so a mute from before this connection has to be
+        # sent again, or HA shows muted over audible music.
+        _remute = esphome.output_mute_on_reconnect(device_id)
+        if _remute is not None:
+            await _send_volume_set(_remute)
         # The ESPHome server object caches the OWW model from server
         # creation — refresh it from the config we just loaded so HA's
         # wake-word dropdown tracks dashboard changes across controller
@@ -4500,20 +4506,25 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         # Convert to HA float, update in-memory state, persist to
                         # config so the value survives controller and device restarts.
                         raw_level = int(msg.get("level", 85))
-                        device.volume = _device_level_to_ha(raw_level)
-                        log.debug(
-                            f"[{device_id}] volume_state: level={raw_level} "
-                            f"→ {device.volume:.3f}"
-                        )
-                        # Persist — read-modify-write to avoid stomping other fields
-                        stored_config = await loop.run_in_executor(
-                            None, db.get_device_config, device_id
-                        )
-                        stored_config["startupVolume"] = raw_level
-                        await loop.run_in_executor(
-                            None, db.set_device_config, device_id, stored_config
-                        )
-                        # Notify ESPHome satellite so HA's media player entity updates
+                        if esphome.output_mute_report(device_id, raw_level):
+                            device.volume = _device_level_to_ha(raw_level)
+                            log.debug(
+                                f"[{device_id}] volume_state: level={raw_level} "
+                                f"→ {device.volume:.3f}"
+                            )
+                            # Persist — read-modify-write to avoid stomping other fields
+                            stored_config = await loop.run_in_executor(
+                                None, db.get_device_config, device_id
+                            )
+                            stored_config["startupVolume"] = raw_level
+                            await loop.run_in_executor(
+                                None, db.set_device_config, device_id, stored_config
+                            )
+                        # Otherwise it is our own output mute echoing back as
+                        # 0: not a volume anyone chose, so neither the startup
+                        # volume nor HA's slider takes it, and unmute restores
+                        # the level from before (#641). HA is told either way,
+                        # so the entity shows muted over the old level.
                         esphome.update_device_volume(device_id, device.volume)
 
                     elif msg_type == "stats":
