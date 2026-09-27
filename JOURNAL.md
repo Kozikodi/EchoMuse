@@ -3930,3 +3930,79 @@ painted.
 
 Also shipped: the login page's volume buttons show + and − as printed on the
 device (#651).
+
+
+## 2026-09-27 — 2.25.0-ea.1 released after a three-Echo UAT; the BLE scan stopped for music in bursts
+
+**Released:** firmware `v2.17.0-ea.1` (prerelease, offered only by EA
+controllers via #665) and `controller-ea-v2.25.0-ea.1`, both on `481f508`. The
+UAT report is `docs/uat-results/2.25.0-ea.1.md`. Merged for it: #658 (db writes
+off the loop), #659 (background tasks held), #660 (token once seen + pairing),
+#662 (FOS6 mute LED), #663, #664, #665, #666 (UAT rig), #670, #673, #675, #676,
+#677, #678, #679, #680.
+
+**The #658 soak was called at 21.5 h, clean.** 0 event-loop stalls. VVV flat
+against baseline, then 7–9 ms RTT and 0% loss the moment its BLE proxy went off
+at 10:46 — on the #658 build, which is the proof the controller answers in
+single-digit ms. C95's worse average tracked its OWN loss (0.04% → ~0.7% from
+10Z), which a whole-window loss average (0.62 vs 0.66) had hidden.
+
+**Music dropped out because the BLE scan never yielded for music** (#670). VVV,
+Music Assistant, proxy on: 23 RTT excursions >250 ms in 2.7 min, worst 2.1 s,
+15+ audible dropouts; proxy off: 0 and none. Music now gets bursts
+(`bluetooth.MusicDuty`: 2 s scan every 7 s, none under 2.5 s buffered), sized to
+Bermuda 0.8.7's 10 s `AREA_MAX_AD_AGE`. Verified in UAT: Bermuda tracked a phone
+through Dev Test 4's proxy alone while music played, no drops heard.
+
+**Why the buffer cannot absorb a stall:** Music Assistant hands an HA player a
+flow stream at 1.03x after a 3 s burst (`PacingProfile.NEAR_REALTIME`,
+`requires_flow_mode` hard-coded True for HA players), and our feed paces by a
+clock estimate that counts frames lost with a dropped connection as delivered.
+After one reconnect the Echo held 1.7 s while the feed believed 4 s, for the
+rest of the stream. #671 (device-reported `music_buffer`, capability-negotiated)
+is the fix — draft, CI green, needs rebasing onto main and a hardware test. The
+same estimate is the likely cause of the UAT's underruns at duck on/release and
+a data-plane keepalive drop.
+
+**A residual echo suppressor was tried and dropped** (branch
+`feat/aec-residual-suppress`). The linear canceller removes 12–20 dB of music on
+15LE; the residual scores "hey jarvis" at 0.25–0.48 over music. speexdsp's
+preprocessor added +10.6 dB on a synthetic syllabic distorted echo but only
++2–3 dB on real music (steady music is learnt as noise), and settings strong
+enough to matter lost wake words over replies (C2 4.0 → 2.6) — AEC3's failure
+again. Gotcha: speexdsp applies unity gains when DENOISE is off, echo
+suppression included. Real wakes over music scored 0.28–0.50 live, so the 0.25
+music bar is necessary; the lever left is music negatives in `oww_forge`.
+
+**Output mute had been advertised and ignored** (#675): VOLUME_MUTE in the
+feature flags, MUTE/UNMUTE falling to "unhandled", `muted=False` hard-coded.
+Now controller-side (`em_output_mute`). UAT found volume-up on the Echo while
+muted landed on the button floor (47) and replaced the stored volume; #678
+restores the old level + one step. Cosmetic left: the ring shows the floor for
+that press (volume_set needs a show-ring flag, firmware).
+
+**Music Assistant:** "SOURCE stall" fired ~60/min on every flow (1 s reads at
+real time, not stalls) and pointed us at Apple Music's rate limiter for nothing;
+resume waited out a 5 s seek probe. #673 fixes both (resume ~2 s) and logs media
+commands. The display running 10–15 s ahead is #674 (MA's clock since
+play_media, no position from us; stop/resume likely skips audio forward).
+
+**UAT rig on three Echoes** (#677): VVV over adb (Magisk busybox, commands pushed
+as scripts), 15LE and C95 over serial. It found a real dashboard bug: a fleet
+save that takes seconds (enabling the BLE proxy starts a server per Echo)
+cleared the dirty flag on reply, so an edit made meanwhile looked saved and was
+never sent (#676, proven on the release image). Also found: the device Logs tab
+not keyboard-scrollable once logs overflow, wizard steps clipping their own
+buttons (scrolling is a stopgap until the redesign), too much wizard copy.
+
+**emOS v0.9 on 15LE and C95 via the wizard.** The upgrade notes are wrong: the
+wizard also installed GA firmware into slot A and removed `controller.json` (its
+empty-list rule), so the rig endpoint had to be rewritten. Mute survived reboot
+on both kernels; pairing worked on all three including FireOS.
+
+**Open:** VVV's mute LED went out once while muted (pin 444 read 0, mic still
+muted; #662 is inert on FOS5; did not reproduce, not Android's screen-off).
+Line out: the jack follows the speaker volume (stock does the same); a
+remembered per-output volume is agreed, not built. #669 (one channel silent with
+clicking on line out) is probably stock's `Right Channel Only`, which we never
+copied.

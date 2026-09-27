@@ -63,6 +63,9 @@ version numbers to the existing issue instead.
 | Music started elsewhere stays silent until a voice turn finishes | [#262](https://github.com/wilbowes/EchoMuse/issues/262) |
 | Double/triple tap detected unreliably | [#115](https://github.com/wilbowes/EchoMuse/issues/115) |
 | High CPU on the device | [#176](https://github.com/wilbowes/EchoMuse/issues/176) |
+| Music Assistant shows the next track 10–15 s before it plays | [#674](https://github.com/wilbowes/EchoMuse/issues/674) |
+| Music drops out when a voice turn ducks it (2.25.0-ea.1) | [#671](https://github.com/wilbowes/EchoMuse/pull/671) |
+| One stereo channel silent, with clicking, on line out | [#669](https://github.com/wilbowes/EchoMuse/issues/669) |
 
 ---
 

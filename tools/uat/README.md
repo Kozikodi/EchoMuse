@@ -29,5 +29,12 @@ python3 rig.py detach <serial> && python3 rig.py down
   control is either checked or listed as missing. Controls are found by role
   and label, which is also what a screen reader uses: a control the rig cannot
   find is usually one a keyboard user cannot reach either.
-- **emOS Echo on USB only.** The serial console is how the rig reads the
-  device; `emos/tools/emconsole.py --list` shows what is attached.
+- **Every UAT Echo on USB.** emOS Echoes are read over their serial console
+  (`emos/tools/emconsole.py --list`), FireOS ones over adb as root with
+  Magisk's busybox; `rig.Echo(serial)` picks by whether adb lists the serial.
+  Attach each (they get labels `UAT <last4>`); controls, the report and the
+  accessibility scan cover every attached Echo.
+- **The provisioning wizard deletes an endpoint file** when the fleet's
+  address list is empty, so an Echo re-provisioned while attached (e.g. an
+  emOS upgrade) falls back to mDNS and leaves the rig: rewrite its
+  `controller.json` before continuing.
