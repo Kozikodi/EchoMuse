@@ -853,10 +853,15 @@ function LinkStrip({ minutes }) {
   );
 }
 
-function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note, sub }) {
+// Read by a screen reader, not drawn: for a meaning otherwise carried only by
+// colour (WCAG 1.4.1).
+const SR_ONLY = { position:'absolute', width:1, height:1, overflow:'hidden',
+                  clip:'rect(0 0 0 0)', whiteSpace:'nowrap' };
+
+function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note, sub, grade }) {
   const dim = value == null;
   return (
-    <div style={{ flex:'1 1 0', minWidth:0 }}>
+    <div style={{ flex:'1 1 0', minWidth:0 }} title={grade ? `${label}: ${grade}` : undefined}>
       <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)',
                     textTransform:'uppercase', letterSpacing:'0.08em', whiteSpace:'nowrap' }}>{label}</div>
       {/* FIXED height, and the glyph is centre-aligned rather than
@@ -875,6 +880,7 @@ function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note, sub }) {
           {dim ? '—' : value}
         </span>
         {!dim && unit && <span style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)' }}>{unit}</span>}
+        {grade && <span style={SR_ONLY}>, {grade}</span>}
         {glyph && <span style={{ marginLeft:'auto', display:'flex', alignItems:'center',
                                  alignSelf:'center', flexShrink:0 }}>{glyph}</span>}
       </div>
@@ -2123,19 +2129,21 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                           on screen to say so. Shown as a note rather than its
                           own tile — it qualifies the link reading, it is not
                           a separate health metric. */}
-                      {/* The verdict is graded on packet loss, not signal: VVV
-                          showed full bars at -43dBm while the AP resent 66% of
-                          its frames (2026-09-23). The bars stay — they are what
-                          people read at a glance — and beside the verdict they
-                          separate the causes: Poor with full bars is
-                          interference or the device, not distance. */}
+                      {/* Headline is the signal, but the GRADE (colour and
+                          meter) is packet loss, not signal: VVV showed full
+                          bars at -43dBm while the AP resent 66% of its frames
+                          (2026-09-23). So a lossy link still goes amber or red
+                          at full signal — interference or the device, not
+                          distance. The dBm headlines rather than the verdict
+                          word, with band and loss below, because the three
+                          did not fit one line (Wil, 2026-09-27). */}
                       <StatTile
-                        label="Link" value={LINK_VERDICT[lq?.verdict] ?? null}
+                        label="Link" value={s?.wifiRssi ?? null} unit="dBm"
+                        grade={LINK_VERDICT[lq?.verdict]}
                         sev={lq?.verdict === 'poor' ? 'bad' : lq?.verdict === 'fair' ? 'warn' : 'ok'}
                         pct={lq?.lossPct == null ? null : Math.max(0, 100 - lq.lossPct * 10)}
                         glyph={<SignalBars rssi={s?.wifiRssi ?? null}/>}
-                        sub={[s?.wifiRssi != null ? `${s.wifiRssi} dBm` : null,
-                              wifiBand(s?.wifiFreqMhz),
+                        sub={[wifiBand(s?.wifiFreqMhz),
                               lq?.lossPct != null ? `${lq.lossPct}% loss` : null]
                              .filter(Boolean).join(' · ') || null}
                       />
