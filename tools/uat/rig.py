@@ -2,7 +2,7 @@
 Release UAT rig: an isolated controller, a USB Echo attached to it, a browser.
 
     rig.py up --image IMAGE      controller container + admin account
-    rig.py attach SERIAL         point a USB Echo at it, approve it
+    rig.py attach SERIAL         point a USB Echo at it, approve it (repeat per Echo)
     rig.py detach SERIAL         put the Echo back exactly as it was
     rig.py down                  remove the controller container
 
@@ -13,8 +13,11 @@ address, through an endpoint file with mdns:false (so it cannot fall back to
 the real controller either). Its own link credentials are copied aside first
 and restored by detach — the rig never loses a device's pairing.
 
-State (admin password, session token, which Echo is attached) is kept in
+State (admin password, session token, which Echoes are attached) is kept in
 UAT_STATE (default ~/.echomuse-uat), never in the repo.
+
+An emOS Echo is reached over its USB serial console, a FireOS one over adb:
+Echo(serial) picks by whether adb lists the serial.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -89,8 +93,69 @@ def wait_for(what: str, fn, timeout: float = 90, every: float = 2):
 
 # ─── Echo over USB ───────────────────────────────────────────────────────────
 
-class Echo:
+def adb_serials() -> set[str]:
+    try:
+        out = subprocess.run(["adb", "devices"], capture_output=True, text=True,
+                             timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    return {l.split()[0] for l in out.splitlines()[1:] if l.strip().endswith("device")}
+
+
+def Echo(serial: str):
+    """The Echo with this serial, over adb (FireOS) or its serial console (emOS)."""
+    return AdbEcho(serial) if serial in adb_serials() else EmosEcho(serial)
+
+
+class AdbEcho:
+    """
+    A FireOS Echo on USB adb, as root.
+
+    Each command is pushed as a script and run with `su -c sh <file>`, so
+    nothing is interpolated into an adb shell line. FireOS 5's toolbox has no
+    cp -p, killall or md5sum, so commands run with Magisk's busybox applets
+    first on PATH, which also makes them the same commands the emOS console
+    runs.
+    """
+    base = "fireos"
+    BUSYBOX = "/data/adb/magisk/busybox"
+    APPLETS = "/data/local/tmp/uat-bb"
+    SCRIPT = "/data/local/tmp/uat-cmd.sh"
+
+    def __init__(self, serial: str):
+        self.serial = serial
+        self._sh(f"mkdir -p {self.APPLETS} && {self.BUSYBOX} --install -s {self.APPLETS}")
+
+    def _sh(self, body: str, timeout: int = 20) -> str:
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+            f.write(body + "\n")
+        try:
+            subprocess.run(["adb", "-s", self.serial, "push", f.name, self.SCRIPT],
+                           capture_output=True, check=True, timeout=timeout)
+        finally:
+            os.unlink(f.name)
+        r = subprocess.run(["adb", "-s", self.serial, "shell", f"su -c 'sh {self.SCRIPT}'"],
+                           capture_output=True, text=True, timeout=timeout)
+        return r.stdout.replace("\r", "")
+
+    def run(self, cmd: str, timeout: int = 20) -> str:
+        return self._sh(f"export PATH={self.APPLETS}:$PATH\n{cmd}", timeout)
+
+    def config_report(self) -> dict | None:
+        out = self.run("cat /tmp/em-config.json 2>/dev/null")
+        m = re.search(r"\{.*\}", out, re.S)
+        return json.loads(m.group(0)) if m else None
+
+    def restart_firmware(self) -> None:
+        self.run("killall server")
+
+    def close(self) -> None:
+        pass
+
+
+class EmosEcho:
     """An emOS Echo on its USB serial console, addressed by serial number."""
+    base = "emos"
 
     def __init__(self, serial: str):
         ports = [p for p, s in list_consoles() if s == serial]
@@ -175,10 +240,11 @@ def attach(serial: str) -> None:
     finally:
         echo.close()
     wait_for(f"{serial} to reach the rig", lambda: device(serial), 120)
-    api("POST", f"/api/devices/{serial}/approve", {"label": "UAT"})
+    # Labels must be unique (#650), and there is one per attached Echo.
+    api("POST", f"/api/devices/{serial}/approve", {"label": f"UAT {serial[-4:]}"})
     d = wait_for(f"{serial} connected", lambda: (device(serial) or {}).get("connected")
                  and device(serial), 180)
-    _save_state(serial=serial)
+    _save_state(serials=sorted(set(_state().get("serials") or []) | {serial}))
     print(f"{serial} attached: firmware {d.get('firmware_ver')}, link "
           f"{'wss' if d.get('linkTls') else 'plain'}")
 
@@ -193,9 +259,11 @@ def detach(serial: str) -> None:
         echo.run(f"[ -e {BACKUP}/.no-controller-json ] && rm -f {DEVICE_ETC}/controller.json")
         echo.run(f"rm -rf {BACKUP}")
         echo.restart_firmware()
+        if isinstance(echo, AdbEcho):
+            echo._sh(f"rm -rf {AdbEcho.APPLETS} {AdbEcho.SCRIPT}")
     finally:
         echo.close()
-    _save_state(serial=None)
+    _save_state(serials=sorted(set(_state().get("serials") or []) - {serial}))
     print(f"{serial} restored to its own controller and credentials")
 
 

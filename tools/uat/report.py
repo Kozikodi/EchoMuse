@@ -30,9 +30,33 @@ MEANING = {
 }
 ORDER = ["FAIL", "api", "missing", "disabled", "received", "applied"]
 
+# Settings that only an emOS userspace acts on. FireOS ignoring them is
+# the design (the dashboard says so), not a failure.
+EMOS_ONLY = {"consolePassword", "consoleTimeoutMin"}
+
+
+def _cell(r: dict, sn: str, base: str) -> str:
+    d = (r.get("devices") or {}).get(sn)
+    if not d:
+        return "—"
+    if base == "fireos" and r["key"] in EMOS_ONLY and d["result"] != "applied":
+        return "n/a (emOS only)"
+    return d["result"]
+
+
+def _row_result(r: dict, echoes: dict) -> str:
+    """Worst per-Echo result, not counting expected emOS-only gaps."""
+    cells = [_cell(r, sn, b) for sn, b in echoes.items()]
+    real = [c for c in cells if c in ORDER]
+    return min(real, key=ORDER.index) if real else r["result"]
+
 
 def build(version: str, controls: dict, a11y: dict, human: dict | None) -> str:
     rows = controls["controls"]
+    echoes = controls.get("echoes") or {controls.get("serial"): "emos"}
+    for r in rows:
+        if r.get("devices"):
+            r["result"] = _row_result(r, echoes)
     n = Counter(r["result"] for r in rows)
     fails = [r for r in rows if r["result"] in ("FAIL", "api", "missing")]
     views = a11y["views"]
@@ -51,7 +75,8 @@ def build(version: str, controls: dict, a11y: dict, human: dict | None) -> str:
 
     out += ["## How this was run", "",
             f"- Controller image `{controls.get('image')}`, isolated rig "
-            "(tools/uat/rig.py); Echo `{}` attached over USB.".format(controls.get("serial")),
+            "(tools/uat/rig.py); Echoes attached over USB: "
+            + ", ".join(f"`{sn}` ({b})" for sn, b in echoes.items()) + ".",
             f"- Controls run {controls.get('at')}; accessibility scan {a11y.get('at')}.",
             "- Each control: changed in the browser, saved, read back from the API, "
             "then checked on the Echo (`/tmp/em-config.json`: received, and applied "
@@ -62,10 +87,15 @@ def build(version: str, controls: dict, a11y: dict, human: dict | None) -> str:
         out += ["## Needs attention", ""] + [
             f"- **{r['label']}** (`{r['key']}`): {r['result']} — {r['detail']}" for r in fails] + [""]
 
-    out += ["## Controls", "", "| Control | Key | Result | Seen |", "|---|---|---|---|"]
+    heads = [f"{sn[-4:]} ({b})" for sn, b in echoes.items()]
+    out += ["## Controls", "",
+            "| Control | Key | " + " | ".join(heads) + " | Seen |",
+            "|---|---|" + "---|" * len(heads) + "---|"]
     for r in sorted(rows, key=lambda r: (ORDER.index(r["result"]) if r["result"] in ORDER else 0,
                                          r["line"])):
-        out.append(f"| {r['label']} | `{r['key']}` | {r['result']} | {r['detail'].replace('|', '/')} |")
+        cells = [_cell(r, sn, b) if r.get("devices") else r["result"] for sn, b in echoes.items()]
+        out.append(f"| {r['label']} | `{r['key']}` | " + " | ".join(cells)
+                   + f" | {r['detail'].replace('|', '/')} |")
     out += ["", "Results: " + "; ".join(f"**{k}** {v}" for k, v in MEANING.items()), ""]
 
     out += ["## Accessibility", ""]
