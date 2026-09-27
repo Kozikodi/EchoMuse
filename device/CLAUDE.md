@@ -1134,6 +1134,21 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
   live**: the ADC mute is hardware and its button LED is a GPIO, so it is the
   one control that works with no controller at all — and making it inert would
   hand back a live mic on reconnect, since mute is persisted in `state.json`.
+  **One action-button gesture is handled BEFORE that gate: a 5 s hold asks
+  to pair** (`client.PairHold` → `StartPairing`, `internal/client/pairing.go`),
+  since the device that cannot connect is the one that needs it. The press is
+  forwarded as usual (the controller ignores presses); the release ending the
+  hold is swallowed so it does not also reach HA as a long press. The window
+  is two minutes and closes early when the credential files change — the
+  approval installs new ones and bounces the link, and a redial still
+  carrying `pairing` would raise a second request for a device already paired.
+  **Three link rings, and they must stay three.** Orange pulse: no controller
+  answered. Orange with odd and even LEDs alternating: a controller answered
+  and refused this device (`errRefused`: a certificate our CA did not sign, or
+  the controller's `refused` message), which the owner fixes by holding the
+  button. White pulse: pending approval. The first two looked identical until
+  2026-09-26, so a device that needed pairing looked like one waiting for its
+  network. Run keeps whichever held state it is in across redials (`held`).
 - **On a FireOS 6 kernel the mute button LED is Amazon's, not ours.** Its
   `amz_privacy` driver (`amz_priv.c`) owns gpio444, toggles its own state on
   every mute release, can be put INTO privacy from software
