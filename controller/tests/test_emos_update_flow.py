@@ -462,6 +462,27 @@ def test_a_leftover_mark_on_the_old_image_reads_as_a_rollback(tmp_path, old):
     assert not dev.mark.exists()
 
 
+def test_a_rollback_nobody_watched_is_noticed_and_cleaned_up(tmp_path, old):
+    """C95, 2026-10-02: the controller was stopped through the trial. init
+    restored the old image and removed the mark, so all that remained was the
+    pushed image."""
+    dev = Device(tmp_path, old)
+    dev.new_image_works = False
+    io = IO(dev)
+    real_relink = io.relink
+    io.relink = lambda: "gone" if dev.boots else real_relink()   # controller away
+    refused(io)
+    assert dev.image() == old and not dev.mark.exists()
+    left = tmp_path / "data/emos/boot-new.img"
+    left.write_bytes(b"x" * 4096)             # as the real run left it
+
+    st, verdict = asyncio.run(up.settle_on_connect(IO(dev).sh))
+    assert verdict == "incomplete" and st["version"] == "emos-v0.9"
+    assert not left.exists()
+    # ...and only once.
+    assert asyncio.run(up.settle_on_connect(IO(dev).sh))[1] == "none"
+
+
 def test_an_ordinary_connect_changes_nothing(tmp_path, old):
     dev = Device(tmp_path, old)
     st, verdict = asyncio.run(up.settle_on_connect(IO(dev).sh))

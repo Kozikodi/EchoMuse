@@ -2688,6 +2688,13 @@ async def _emos_status_on_connect(live, device_id: str) -> None:
     if verdict == "confirm":
         await _push_log_event(device_id, "info", "controller",
                               f"✓ emOS update confirmed: {st['version']}")
+    elif verdict == "incomplete":
+        log.warning(f"[api] [{device_id}] an emOS update did not complete; "
+                    f"running {st['version']}")
+        await _push_log_event(
+            device_id, "warn", "controller",
+            f"An emOS update did not complete or was rolled back: the Echo "
+            f"is running {st['version']}. The image it left behind was removed.")
     elif verdict == "rolled_back":
         await _push_log_event(
             device_id, "warn", "controller",

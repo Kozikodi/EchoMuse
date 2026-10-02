@@ -549,7 +549,8 @@ def status_cmd() -> str:
     return (f"echo OSR_BEGIN; cat {OS_RELEASE} 2>/dev/null; echo OSR_END; "
             f"echo MARK_BEGIN; cat {TRIAL_MARK} 2>/dev/null; echo MARK_END; "
             f"echo \"STATE:$(cat {BOOT_STATE} 2>/dev/null)\"; "
-            f"echo \"UPTIME:$(cat /proc/uptime 2>/dev/null)\"; echo {OK}")
+            f"echo \"UPTIME:$(cat /proc/uptime 2>/dev/null)\"; "
+            f"[ -e {NEW_IMG} ] && echo NEWIMG:left; echo {OK}")
 
 
 def booted_before(uptime, since_s: float) -> bool:
@@ -567,7 +568,8 @@ def parse_status(out: str) -> dict:
     return {"version": version, "build": build_id,
             "mark": parse_mark(_between(out, "MARK_BEGIN", "MARK_END")),
             "state": _line(out, "STATE:"),
-            "uptime": _uptime(_line(out, "UPTIME:"))}
+            "uptime": _uptime(_line(out, "UPTIME:")),
+            "leftover": _line(out, "NEWIMG:") == "left"}
 
 
 def _uptime(text: str):
@@ -801,11 +803,19 @@ async def settle_on_connect(sh):
     Stateless for that reason: the mark carries the build it was written for,
     so "the device runs that build and reached us" is decidable from the
     device alone. Returns (status, verdict); status is {} if it did not answer.
+    Verdicts are mark_verdict's, plus "incomplete": no mark, but the pushed
+    image is still on /data, so an update was started and did not finish.
     """
     st = parse_status(await sh(status_cmd(), 30.0))
     if not st:
         return {}, "none"
     verdict = mark_verdict(st["mark"], st["build"])
+    # init removes the mark when it restores the old image, so a rollback
+    # nobody watched leaves no mark — only the image that was pushed. Found on
+    # C95, 2026-10-02: rolled back with the controller stopped, 7MB left on
+    # /data and nothing to say an update had been tried.
+    if verdict == "none" and st["leftover"]:
+        verdict = "incomplete"
     if verdict != "none" and OK not in await sh(CONFIRM_CMD, 30.0):
         verdict = "none"                # ask again on the next connect
     return st, verdict
