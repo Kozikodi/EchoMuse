@@ -763,6 +763,9 @@ static int  readint(const char *path);
 #ifndef TRIALMARK
 #define TRIALMARK "/data/emos/update.pending"
 #endif
+#ifndef ROLLBACKREC
+#define ROLLBACKREC "/data/emos/rollback.last"
+#endif
 #define MAX_TRIES 3
 /* How long an image on trial has, from kernel start, to be confirmed. A boot
  * reaches the network in under a minute and the controller confirms seconds
@@ -854,8 +857,58 @@ static int reboot_into(const char *mode)
     return -1;
 }
 
+/* The id in a boot image's header, as 40 hex digits. -1 if `path` does not
+ * hold a boot image. */
+static int image_id_hex(const char *path, char hex[41])
+{
+    unsigned char id[20];
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    long len = boot_image_len(fd);
+    ssize_t n = len > 0 ? pread(fd, id, sizeof id, 576) : -1;
+    close(fd);
+    if (n != (ssize_t)sizeof id)
+        return -1;
+    for (int i = 0; i < 20; i++)
+        snprintf(hex + 2 * i, 3, "%02x", id[i]);
+    return 0;
+}
+
+/* Say that a rollback happened, for whoever asks later.
+ *
+ * The restore removes the trial mark and leaves the device looking as it did
+ * before the update, so without this the controller can only infer a rollback
+ * from the image an update left on /data — and a rollback that was not an
+ * update at all leaves nothing. Found on the first forced rollback, C95,
+ * 2026-10-02.
+ *
+ * `from` is the image that failed and `to` the one restored, by header id;
+ * "unknown" when one cannot be read. Equal ids mean the same image was
+ * rewritten: three unconfirmed boots with no update involved. No timestamp:
+ * this runs before the network, and the clock has not been set.
+ *
+ * Called BEFORE the partition is overwritten, since `from` is read off it.
+ * The controller reads the record on connect and removes it
+ * (controller/em_emos_update.py); trialcheck.c pins the format.
+ */
+static void write_rollback_record(int tries)
+{
+    char from[41] = "unknown", to[41] = "unknown", b[160];
+    image_id_hex(BOOTDEV, from);
+    image_id_hex(GOODIMG, to);
+    int k = snprintf(b, sizeof b, "from=%s\nto=%s\ntries=%d\n", from, to, tries);
+    int fd = open(ROLLBACKREC, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return;
+    if (write(fd, b, k) != k)
+        note("rollback record short write\n");
+    fsync(fd);
+    close(fd);
+}
+
 /* Write the known-good image back over the boot partition and reboot into it. */
-static void restore_good(void)
+static void restore_good(int tries)
 {
     int in = open(GOODIMG, O_RDONLY);
     if (in < 0)
@@ -864,6 +917,7 @@ static void restore_good(void)
     if (fstat(in, &st) != 0 || st.st_size < 2048) { close(in); return; }
     int out = open(BOOTDEV, O_WRONLY);
     if (out < 0) { close(in); return; }
+    write_rollback_record(tries);
     int rc = copy_range(in, out, st.st_size);
     fsync(out);
     close(out);
@@ -949,18 +1003,7 @@ enum { TRIAL_NONE, TRIAL_ACTIVE, TRIAL_STALE };
 /* The boot image id of whatever is on the boot partition, as hex. */
 static int boot_image_id_hex(char hex[41])
 {
-    unsigned char id[20];
-    int fd = open(BOOTDEV, O_RDONLY);
-    if (fd < 0)
-        return -1;
-    long len = boot_image_len(fd);
-    ssize_t n = len > 0 ? pread(fd, id, sizeof id, 576) : -1;
-    close(fd);
-    if (n != (ssize_t)sizeof id)
-        return -1;
-    for (int i = 0; i < 20; i++)
-        snprintf(hex + 2 * i, 3, "%02x", id[i]);
-    return 0;
+    return image_id_hex(BOOTDEV, hex);
 }
 
 static int trial_state(void)
@@ -2511,7 +2554,7 @@ int main(int argc, char **argv)
     note("stage=boot try=%d\n", tries + 1);
     if (tries >= MAX_TRIES && access(GOODIMG, R_OK) == 0) {
         note("rollback: %d unconfirmed boots, restoring known-good\n", tries);
-        restore_good();                 /* reboots; returns only on failure */
+        restore_good(tries);            /* reboots; returns only on failure */
     }
     write_state(tries + 1);
     /* Is this image on trial? Armed only while a failed trial still has a

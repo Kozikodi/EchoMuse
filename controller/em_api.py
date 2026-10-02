@@ -2696,10 +2696,13 @@ async def _emos_status_on_connect(live, device_id: str) -> None:
             f"An emOS update did not complete or was rolled back: the Echo "
             f"is running {st['version']}. The image it left behind was removed.")
     elif verdict == "rolled_back":
-        await _push_log_event(
-            device_id, "warn", "controller",
-            f"emOS update to {st['mark'].get('version', '?')} was rolled "
-            f"back: the Echo is running {st['version']}")
+        if st["rollback"]:
+            msg = em_emos_update.rollback_text(st["rollback"], st["version"])
+        else:
+            msg = (f"emOS update to {st['mark'].get('version', '?')} was "
+                   f"rolled back: the Echo is running {st['version']}")
+        log.warning(f"[api] [{device_id}] {msg}")
+        await _push_log_event(device_id, "warn", "controller", msg)
 
 
 # ─── Shell helpers ────────────────────────────────────────────────────────────

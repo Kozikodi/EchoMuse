@@ -709,6 +709,12 @@ naming any other image is removed at boot. `trialcheck.c` drives the real
 parser; the controller's half is `controller/em_emos_update.py`. To confirm an
 image by hand from the console, `rm /data/emos/update.pending`.
 
+**A restore leaves a record**, `/data/emos/rollback.last`: the header ids of
+the image that failed and the one restored, and the number of unconfirmed
+boots. The controller reads it on the next connect, reports it in the Echo's
+log and removes it. Equal ids mean the same image was written back, which is
+three unconfirmed boots with no update involved.
+
 This is deliberately NOT the bootloader's A/B. biscuit has a real second slot
 and LK chooses between them; we have not reverse engineered how, and the
 standing guess — three tries per slot and then a soft brick — remains

@@ -70,6 +70,7 @@ class Device:
         self.new_image_works = True
         self.ignore_reboot = False
         self.corrupt_writes = 0       # how many writes to spoil before read-back
+        self.writes_record = True     # False: an init older than 0.10
         self.boots = 0
         self.trial = False
         self._load()
@@ -99,6 +100,10 @@ class Device:
             tries = int(self.statef.read_text() or 0)
             if tries >= up.MAX_TRIES and self.good.exists():
                 good = self.good.read_bytes()
+                if self.writes_record:
+                    (self.root / "data/emos/rollback.last").write_text(
+                        f"from={up.stored_id(self.image())}\n"
+                        f"to={up.stored_id(good)}\ntries={tries}\n")
                 part = bytearray(self.boot.read_bytes())
                 part[:len(good)] = good
                 self.boot.write_bytes(bytes(part))
@@ -303,6 +308,9 @@ def test_an_image_that_never_reaches_the_controller_is_rolled_back(tmp_path, old
     assert not dev.mark.exists()
     assert not (tmp_path / "data/emos/boot-new.img").exists()
     assert io.records[-1][0] == "emos-v0.9"
+    # init said so itself, and the record does not outlive the report.
+    assert "after 3 unconfirmed boots" in msg
+    assert not (tmp_path / "data/emos/rollback.last").exists()
 
 
 def test_a_write_that_does_not_read_back_is_undone_on_the_spot(tmp_path, old):
@@ -468,6 +476,7 @@ def test_a_rollback_nobody_watched_is_noticed_and_cleaned_up(tmp_path, old):
     pushed image."""
     dev = Device(tmp_path, old)
     dev.new_image_works = False
+    dev.writes_record = False                 # the rolled-back init is 0.9
     io = IO(dev)
     real_relink = io.relink
     io.relink = lambda: "gone" if dev.boots else real_relink()   # controller away
@@ -480,6 +489,25 @@ def test_a_rollback_nobody_watched_is_noticed_and_cleaned_up(tmp_path, old):
     assert verdict == "incomplete" and st["version"] == "emos-v0.9"
     assert not left.exists()
     # ...and only once.
+    assert asyncio.run(up.settle_on_connect(IO(dev).sh))[1] == "none"
+
+
+def test_an_unwatched_rollback_is_reported_from_inits_own_record(tmp_path, old):
+    dev = Device(tmp_path, old)
+    dev.new_image_works = False
+    io = IO(dev)
+    real_relink = io.relink
+    io.relink = lambda: "gone" if dev.boots else real_relink()   # controller away
+    refused(io)
+    rec = tmp_path / "data/emos/rollback.last"
+    assert rec.exists() and dev.image() == old
+
+    st, verdict = asyncio.run(up.settle_on_connect(IO(dev).sh))
+    assert verdict == "rolled_back"
+    assert st["rollback"]["tries"] == 3 and st["rollback"]["from"] != st["rollback"]["to"]
+    assert "restored its previous image" in up.rollback_text(st["rollback"], st["version"])
+    assert not rec.exists()
+    assert not (tmp_path / "data/emos/boot-new.img").exists()
     assert asyncio.run(up.settle_on_connect(IO(dev).sh))[1] == "none"
 
 

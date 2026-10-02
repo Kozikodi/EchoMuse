@@ -1672,10 +1672,25 @@ for, so a controller that restarted mid-update still confirms. It also stores
 than added to the register message, because the mark needs that round trip
 anyway and it works on every fielded firmware.
 
+**init says when it rolled back** (`/data/emos/rollback.last`, from 0.10:
+failed id, restored id, tries). It removes the mark as it restores, so before
+this the returning controller could only infer a rollback from the image an
+update had left on `/data` — C95's forced rollback, 2026-10-02, came back
+with nothing reported and 7MB left behind. `settle_on_connect` reads the
+record, reports it and removes it; with no record (an init older than 0.10) a
+pushed image and no mark is still reported, as "did not complete".
+
 **A redial is told from a restart by kernel uptime.** The old build on a new
 connection is a rollback only if the kernel has NOT been up since before the
 restart was asked for; otherwise it never restarted, and the mark is left so
 the trial still applies when it does.
+
+**Run on hardware 2026-10-02**, C95 (amonet 1, 64-bit) and 15LE (amonet 2,
+32-bit): 0.9 to a test build on both, partition md5 equal to the image sent
+and to the promoted `boot-good.img`, confirmed 10s after network-up. Forced
+failure on C95 with the controller stopped: three trial boots of ~185s, amber,
+the previous image back byte-identical, 11 minutes in all. FireOS 5's own
+busybox takes `dd conv=notrunc,fsync`.
 
 **What it cannot recover** is an image that fails before init runs, which
 needs TWRP and a cable. A power cut during the ~1s write lands there. The

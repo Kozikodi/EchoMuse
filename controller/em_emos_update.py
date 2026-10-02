@@ -47,6 +47,8 @@ GOOD_IMG = "/data/emos/boot-good.img"
 BOOT_STATE = "/data/emos/boot.state"
 TRIAL_MARK = "/data/emos/update.pending"
 NEW_IMG = "/data/emos/boot-new.img"
+# Written by init when it restores the known-good image (from 0.10).
+ROLLBACK_REC = "/data/emos/rollback.last"
 
 # The first emOS whose init understands the trial mark. Anything older would
 # be flashed with nothing to roll it back unattended, so it is never offered.
@@ -313,6 +315,29 @@ def parse_mark(text) -> dict:
     return out
 
 
+def parse_rollback(text) -> dict:
+    """init's rollback record: {"from", "to", "tries"}, or {} if there is
+    none. An id init could not read arrives as "unknown" and is kept as that."""
+    out = {}
+    for line in (text or "").splitlines():
+        key, sep, val = line.strip().partition("=")
+        if sep and key in ("from", "to") and (
+                _HEX40.fullmatch(val) or val == "unknown"):
+            out[key] = val
+        elif sep and key == "tries" and val.isdigit():
+            out[key] = int(val)
+    return out if {"from", "to", "tries"} <= out.keys() else {}
+
+
+def rollback_text(rec: dict, running) -> str:
+    """The sentence for the device log."""
+    if rec["from"] != rec["to"]:
+        return (f"emOS rolled back after {rec['tries']} unconfirmed boots: the "
+                f"Echo restored its previous image and is running {running}")
+    return (f"emOS rewrote its known-good image after {rec['tries']} "
+            f"unconfirmed boots; the Echo is running {running}")
+
+
 def mark_verdict(mark: dict, running_build) -> str:
     """What a mark found on a connected device means.
 
@@ -541,7 +566,9 @@ def write_verdict(out: str, want_md5: str) -> str:
 REBOOT_CMD = f"sync; kill -TERM 1; echo {OK}"
 
 CLEANUP_CMD = f"rm -f {NEW_IMG} {NEW_IMG}.part {TRIAL_MARK}.tmp; echo {OK}"
-CONFIRM_CMD = f"rm -f {TRIAL_MARK}; sync; " + CLEANUP_CMD
+# Also removes init's rollback record: by the time this runs, whoever sent it
+# has read the status and reported what the record said.
+CONFIRM_CMD = f"rm -f {TRIAL_MARK} {ROLLBACK_REC}; sync; " + CLEANUP_CMD
 
 
 def status_cmd() -> str:
@@ -550,7 +577,9 @@ def status_cmd() -> str:
             f"echo MARK_BEGIN; cat {TRIAL_MARK} 2>/dev/null; echo MARK_END; "
             f"echo \"STATE:$(cat {BOOT_STATE} 2>/dev/null)\"; "
             f"echo \"UPTIME:$(cat /proc/uptime 2>/dev/null)\"; "
-            f"[ -e {NEW_IMG} ] && echo NEWIMG:left; echo {OK}")
+            f"[ -e {NEW_IMG} ] && echo NEWIMG:left; "
+            f"echo RB_BEGIN; cat {ROLLBACK_REC} 2>/dev/null; echo RB_END; "
+            f"echo {OK}")
 
 
 def booted_before(uptime, since_s: float) -> bool:
@@ -569,7 +598,8 @@ def parse_status(out: str) -> dict:
             "mark": parse_mark(_between(out, "MARK_BEGIN", "MARK_END")),
             "state": _line(out, "STATE:"),
             "uptime": _uptime(_line(out, "UPTIME:")),
-            "leftover": _line(out, "NEWIMG:") == "left"}
+            "leftover": _line(out, "NEWIMG:") == "left",
+            "rollback": parse_rollback(_between(out, "RB_BEGIN", "RB_END"))}
 
 
 def _uptime(text: str):
@@ -783,10 +813,12 @@ async def _watch(io, version, new_build, old_version, old_build, asked):
             continue
         await io.sh(CONFIRM_CMD, 30.0)
         if st["build"] == old_build:
+            tries = st["rollback"].get("tries")
             raise Refused(
                 f"rolled back to emOS {old_version}: the new image did not "
                 f"reach the controller within its trial, so the Echo restored "
-                f"the previous one by itself")
+                f"the previous one by itself"
+                + (f" after {tries} unconfirmed boots" if tries else ""))
         raise Refused(f"the Echo came back on emOS {st['version']} (build "
                       f"{st['build']}), which is neither the old image nor "
                       f"the new one")
@@ -816,6 +848,10 @@ async def settle_on_connect(sh):
     # /data and nothing to say an update had been tried.
     if verdict == "none" and st["leftover"]:
         verdict = "incomplete"
+    # init from 0.10 says so itself, which also covers a rollback that was
+    # not an update at all.
+    if st["rollback"]:
+        verdict = "rolled_back"
     if verdict != "none" and OK not in await sh(CONFIRM_CMD, 30.0):
         verdict = "none"                # ask again on the next connect
     return st, verdict

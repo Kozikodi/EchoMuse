@@ -357,6 +357,37 @@ def test_the_mark_round_trips():
     assert up.parse_mark(None) == {}
 
 
+def test_the_rollback_record_is_the_one_trialcheck_writes():
+    text = f"from={SHARED_ID}\nto=unknown\ntries=3\n"
+    src = (REPO / "emos" / "init" / "trialcheck.c").read_text()
+    assert '"from=" ID_HEX "\\n"' in src and '"to=unknown\\n"' in src \
+        and '"tries=3\\n"' in src
+    assert up.parse_rollback(text) == {
+        "from": SHARED_ID, "to": "unknown", "tries": 3}
+    init = (REPO / "emos" / "init" / "init.c").read_text()
+    assert f'#define ROLLBACKREC "{up.ROLLBACK_REC}"' in init
+    assert '"from=%s\\nto=%s\\ntries=%d\\n"' in init
+
+
+@pytest.mark.parametrize("text", [
+    "", None, "from=abc\nto=unknown\ntries=3\n",
+    f"from={SHARED_ID}\nto={SHARED_ID}\n",
+    f"from={SHARED_ID}\nto={SHARED_ID}\ntries=three\n",
+    f"from={SHARED_ID}; reboot\nto={SHARED_ID}\ntries=3\n",
+])
+def test_a_damaged_rollback_record_is_no_record(text):
+    assert up.parse_rollback(text) == {}
+
+
+def test_what_a_rollback_record_says():
+    other = "ab" * 20
+    assert "restored its previous image" in up.rollback_text(
+        {"from": SHARED_ID, "to": other, "tries": 3}, "emos-v0.10")
+    # The same image written back: no update was involved.
+    assert "rewrote its known-good image" in up.rollback_text(
+        {"from": other, "to": other, "tries": 3}, "emos-v0.10")
+
+
 def test_mark_verdicts():
     mark = up.parse_mark(up.trial_mark(SHARED_ID, "newbuild", "emos-v0.10"))
     assert up.mark_verdict({}, "anything") == "none"

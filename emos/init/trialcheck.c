@@ -25,6 +25,7 @@
 #define TRIALMARK "/tmp/emos-trialcheck.pending"
 #define GOODIMG   "/tmp/emos-trialcheck.good"
 #define BOOTSTATE "/tmp/emos-trialcheck.state"
+#define ROLLBACKREC "/tmp/emos-trialcheck.rollback"
 #define main   init_main_unused
 
 #include "init.c"
@@ -111,6 +112,42 @@ int main(void)
     if (trial_pending())  { printf("FAIL  pending after the mark was removed\n"); failures++; }
     else printf("ok    removing the mark ends the trial\n");
     on_trial = 0;
+
+    /* The rollback record: what the controller reads to say a rollback
+     * happened. The same text is in tests/test_emos_update.py. */
+    {
+        static const char want[] =
+            "from=" ID_HEX "\n"
+            "to=unknown\n"
+            "tries=3\n";
+        char got[200] = {0};
+        write_boot(1);
+        unlink(GOODIMG);
+        unlink(ROLLBACKREC);
+        write_rollback_record(3);
+        FILE *f = fopen(ROLLBACKREC, "r");
+        if (f) { size_t n = fread(got, 1, sizeof got - 1, f); (void)n; fclose(f); }
+        if (strcmp(got, want)) {
+            printf("FAIL  rollback record with no known-good:\n%s", got);
+            failures++;
+        } else
+            printf("ok    rollback record names the failed image\n");
+
+        /* Both readable: the restored image is named too. */
+        rename(BOOTDEV, GOODIMG);
+        write_boot(1);
+        write_rollback_record(3);
+        memset(got, 0, sizeof got);
+        f = fopen(ROLLBACKREC, "r");
+        if (f) { size_t n = fread(got, 1, sizeof got - 1, f); (void)n; fclose(f); }
+        if (strcmp(got, "from=" ID_HEX "\nto=" ID_HEX "\ntries=3\n")) {
+            printf("FAIL  rollback record with both images:\n%s", got);
+            failures++;
+        } else
+            printf("ok    rollback record names the restored image\n");
+        unlink(GOODIMG);
+        unlink(ROLLBACKREC);
+    }
 
     unlink(BOOTDEV);
     unlink(TRIALMARK);
