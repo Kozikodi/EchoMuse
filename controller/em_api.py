@@ -2523,6 +2523,9 @@ async def _post_device_emos_update(request: web.Request) -> web.Response:
 async def _emos_update_failed(device_id: str, reason: str) -> None:
     """Every abort path comes through here, as _update_failed's do."""
     _emos_update_errors[device_id] = reason
+    # The controller's own log as well as the device's: on C95's first run
+    # the only trace here was the file transfer, with no outcome either way.
+    log.warning(f"[api] [{device_id}] emOS update failed: {reason}")
     await _push_log_event(device_id, "error", "controller",
                           f"emOS update: {reason}")
     await _push_event({"type": "device_emos_update_failed",
@@ -2586,6 +2589,10 @@ async def _emos_sh(live, cmd: str, timeout: float = 60.0) -> str:
     return buf
 
 
+# `step` takes a `log` argument, which hides the module's logger inside it.
+_emos_log = log
+
+
 class _EmosIO:
     """What em_emos_update.run_update needs from the controller."""
 
@@ -2623,6 +2630,7 @@ class _EmosIO:
     async def step(self, msg: str, log: bool = True) -> None:
         _emos_update_stage[self.device_id] = msg
         if log:
+            _emos_log.info(f"[api] [{self.device_id}] emOS update: {msg}")
             await _push_log_event(self.device_id, "info", "controller",
                                   f"emOS update: {msg}")
 
@@ -2656,6 +2664,7 @@ async def _run_emos_update_locked(device_id: str, override: tuple | None) -> Non
     except em_emos_update.Refused as e:
         return await _emos_update_failed(device_id, str(e))
     _emos_update_errors.pop(device_id, None)
+    log.info(f"[api] [{device_id}] emOS update confirmed: {version}")
     await _push_log_event(device_id, "info", "controller",
                           f"✓ emOS update confirmed: {version}")
     await _push_event({"type": "device_emos_updated",
