@@ -140,6 +140,7 @@ COPY em_console_pw.py .
 COPY em_labels.py .
 COPY em_crashlog.py .
 COPY em_emos_build.py .
+COPY em_emos_update.py .
 COPY em_recordings.py .
 COPY em_turnclock.py .
 COPY em_firmware.py .

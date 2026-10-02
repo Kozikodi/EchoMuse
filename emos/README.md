@@ -697,6 +697,18 @@ reachability is the property that makes a device fixable without hands on it.
 After three unconfirmed boots init restores the known-good image, shows an
 amber ring and reboots.
 
+**An image installed over the network is on trial, and network-up does not
+confirm it.** The controller writes `/data/emos/update.pending` before it
+flashes, naming the new image by its header id, and removes it once the Echo
+has re-registered on that image. While the mark names the running image, init
+reboots at 180 seconds unconfirmed, and three of those restore the known-good
+image as above. That closes the two gaps the plain rule leaves with nobody at
+the device: an image whose WiFi is broken never reboots to be counted, and one
+that gets an address but cannot run the firmware would be promoted. A mark
+naming any other image is removed at boot. `trialcheck.c` drives the real
+parser; the controller's half is `controller/em_emos_update.py`. To confirm an
+image by hand from the console, `rm /data/emos/update.pending`.
+
 This is deliberately NOT the bootloader's A/B. biscuit has a real second slot
 and LK chooses between them; we have not reverse engineered how, and the
 standing guess — three tries per slot and then a soft brick — remains

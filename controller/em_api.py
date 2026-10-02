@@ -69,6 +69,7 @@ import em_tcp
 import em_labels
 import em_crashlog
 import em_emos_build
+import em_emos_update
 import em_firmware
 import em_ingressauth
 import em_oww_assets
@@ -242,6 +243,25 @@ _update_errors: dict[str, str] = {}
 # Pending local binary uploads — keyed by UUID token, expire after 10 minutes.
 _pending_uploads: dict[str, bytes] = {}
 
+# emOS updates (#573, em_emos_update). Their own sets rather than the firmware
+# ones above: the dashboard shows the two side by side, and a shared flag
+# would put "updating…" on the firmware panel while emOS is being flashed.
+# Both endpoints refuse while EITHER is running on a device.
+_emos_updates_in_progress: set[str] = set()
+_emos_updates_queued: set[str] = set()
+_emos_update_errors: dict[str, str] = {}
+# The step an update is on, for the panel. Cleared when it ends.
+_emos_update_stage: dict[str, str] = {}
+# Uploaded payload bundles (the dev path), token -> (files, version).
+_pending_emos_uploads: dict[str, tuple] = {}
+# The newest emOS release's tag, as last seen. `_emos_latest_version` falls
+# back to the stored copy, so a restart does not blank the Updates tab.
+_emos_latest: str = ""
+
+# An emOS update holds the queue through the reboot and, when the new image
+# fails, through init's whole trial and rollback.
+EMOS_OTA_MAX_HOLD_S = em_emos_update.WATCH_S + 600.0
+
 # Largest firmware binary /api/releases/upload will accept. Roughly 5x the
 # current ~10.7 MB build, so it bounds memory (the upload is held in RAM until
 # deployed or expired) without needing revision every release. The aiohttp
@@ -411,6 +431,8 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/devices/{id}/wifi",         _post_device_wifi)
     app.router.add_post("/api/devices/{id}/wifi/scan",    _post_device_wifi_scan)
     app.router.add_post("/api/devices/{id}/update",       _post_device_update)
+    app.router.add_post("/api/devices/{id}/emos_update",  _post_device_emos_update)
+    app.router.add_post("/api/emos/upload",               _post_emos_upload)
     app.router.add_post("/api/devices/{id}/rollback",     _post_device_rollback)
     app.router.add_post("/api/releases/upload",           _post_upload_binary)
 
@@ -1716,7 +1738,8 @@ async def _post_device_update(request: web.Request) -> web.Response:
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
-    if device_id in _updates_in_progress or device_id in _updates_queued:
+    if (device_id in _updates_in_progress or device_id in _updates_queued
+            or _emos_update_busy(device_id)):
         return _error("update_in_progress", "An update is already in progress", 409)
 
     # Installing what the device is already running costs a transfer, a
@@ -1770,7 +1793,8 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
-    if device_id in _updates_in_progress or device_id in _updates_queued:
+    if (device_id in _updates_in_progress or device_id in _updates_queued
+            or _emos_update_busy(device_id)):
         return _error("update_in_progress", "An update is already in progress", 409)
 
     em_tasks.spawn(_run_rollback(device_id, row["firmware_previous"]))
@@ -2372,6 +2396,294 @@ async def _monitor_reconnect(
         await asyncio.sleep(2)
 
     return False
+
+
+# ─── emOS update (#573) ───────────────────────────────────────────────────────
+#
+# Same shape as the firmware update above — per device, queued behind
+# `_ota_lock`, verified before anything is written, watched afterwards — but
+# what it writes is the boot partition. em_emos_update holds every decision
+# and its docstring is the design; this section only carries.
+
+def _emos_update_busy(device_id: str) -> bool:
+    return (device_id in _emos_updates_in_progress
+            or device_id in _emos_updates_queued)
+
+
+@auth.require_admin
+async def _post_emos_upload(request: web.Request) -> web.Response:
+    """
+    POST /api/emos/upload (multipart: field "payload", an emos-payload.zip)
+
+    The emOS counterpart of /api/releases/upload: a locally built payload
+    bundle (emos/tools/make-payload-bundle.py), so an init can be tried on a
+    bench device before it is tagged. Returns an upload_token for
+    /api/devices/{id}/emos_update, valid for 10 minutes.
+    """
+    import uuid as _uuid
+    try:
+        reader = await request.multipart()
+        field = await reader.next()
+        if field is None or field.name != "payload":
+            return _error("invalid_upload",
+                          "Expected multipart field 'payload'", 400)
+        raw = await field.read()
+    except web.HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"[api] emOS payload upload error: {e}")
+        return _error("upload_failed", str(e), 500)
+    if not raw:
+        return _error("empty_upload", "Uploaded payload is empty", 400)
+    if len(raw) > UPLOAD_MAX_BYTES:
+        return _error("too_large", "Payload is over the upload limit", 413)
+    try:
+        payload = await asyncio.get_event_loop().run_in_executor(
+            None, em_emos_build.read_payload_bundle, raw)
+    except em_emos_build.BuildError as e:
+        return _error("bad_payload", f"That is not a usable emOS payload: {e}", 400)
+
+    version = payload["version"] or f"local-{time.strftime('%Y%m%d-%H%M')}"
+    token = str(_uuid.uuid4())
+    _pending_emos_uploads[token] = (payload["files"], version)
+    log.info(f"[api] emOS payload uploaded: {len(raw):,} bytes "
+             f"version={version} files={sorted(payload['files'])}")
+
+    async def _expire():
+        await asyncio.sleep(600)
+        _pending_emos_uploads.pop(token, None)
+    em_tasks.spawn(_expire())
+    return _ok({"upload_token": token, "version": version,
+                "files": sorted(payload["files"])})
+
+
+@auth.require_admin
+async def _post_device_emos_update(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/emos_update
+
+    Rebuild the device's emOS image around the latest release's init and flash
+    it. Optional JSON body: {"upload_token": "..."} to use an uploaded payload
+    instead, {"force": true} to install a release the device is not behind.
+
+    Returns 202 — the update runs in the background.
+    """
+    device_id = request.match_info["id"]
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    loop = asyncio.get_event_loop()
+    row = await loop.run_in_executor(None, db.get_device, device_id)
+    if row is None:
+        return _error("device_not_found", f"No device: {device_id}", 404)
+    live = _devices.get(device_id)
+    if live is None:
+        return _error("device_offline", "Device is not connected", 409)
+    # Refused here as well as greyed out in the panel: this is a plain POST.
+    if live.android_userspace:
+        return _error("not_emos", "This device is not running emOS", 409)
+    if (_emos_update_busy(device_id) or device_id in _updates_in_progress
+            or device_id in _updates_queued):
+        return _error("update_in_progress", "An update is already in progress", 409)
+
+    override = None
+    token = body.get("upload_token")
+    if token:
+        override = _pending_emos_uploads.get(token)
+        if override is None:
+            return _error("invalid_token", "Upload token not found or expired", 404)
+        version = override[1]
+    else:
+        release = await _fetch_latest_emos_release()
+        if release is None:
+            return _error("no_release", "No emOS release information available", 409)
+        version = release["version"]
+        if not em_emos_update.can_target(version):
+            return _error(
+                "release_too_old",
+                f"emOS {version} predates updating over the network: its init "
+                f"cannot roll a failed update back by itself.", 409)
+        if (not em_emos_update.update_available(row["emos_version"], version)
+                and not body.get("force")):
+            return _error(
+                "already_running",
+                f"This device runs emOS {row['emos_version'] or 'unknown'}; "
+                f"{version} is not an update for it. Pass force to install "
+                f"it anyway.", 409)
+
+    if token:
+        _pending_emos_uploads.pop(token, None)
+    em_tasks.spawn(_run_emos_update(device_id, override))
+    return _ok({"status": "started", "version": version}, status=202)
+
+
+async def _emos_update_failed(device_id: str, reason: str) -> None:
+    """Every abort path comes through here, as _update_failed's do."""
+    _emos_update_errors[device_id] = reason
+    await _push_log_event(device_id, "error", "controller",
+                          f"emOS update: {reason}")
+    await _push_event({"type": "device_emos_update_failed",
+                       "device_id": device_id, "error": reason})
+
+
+async def _run_emos_update(device_id: str, override: tuple | None = None) -> None:
+    """Background task: queue behind `_ota_lock`, then update under a cap."""
+    _emos_update_errors.pop(device_id, None)
+    _emos_updates_queued.add(device_id)
+    try:
+        await _ota_lock.acquire()
+    finally:
+        _emos_updates_queued.discard(device_id)
+
+    _emos_updates_in_progress.add(device_id)
+    try:
+        await asyncio.wait_for(_run_emos_update_locked(device_id, override),
+                               timeout=EMOS_OTA_MAX_HOLD_S)
+    except asyncio.TimeoutError:
+        await _emos_update_failed(
+            device_id,
+            f"abandoned after {EMOS_OTA_MAX_HOLD_S:.0f}s so the queue could "
+            f"continue — the device may still be mid-update")
+    except Exception as e:
+        log.exception(f"[api] emOS update error for {device_id}: {e}")
+        await _emos_update_failed(device_id, f"exception: {e}")
+    finally:
+        _emos_updates_in_progress.discard(device_id)
+        _emos_update_stage.pop(device_id, None)
+        _ota_lock.release()
+
+
+async def _emos_sh(live, cmd: str, timeout: float = 60.0) -> str:
+    """
+    Run `cmd` on the device and return what it printed up to em_emos_update.OK.
+
+    Not _shell_run: that gives up after 5s of SILENCE, and a boot partition
+    write is silent for longer than that. Returning early would also close the
+    session under a dd that is still running. This waits the whole timeout,
+    and a reply without OK is "did not finish" to every parser.
+    """
+    device_id = live.device_id
+    buf = ""
+    try:
+        ws = await _get_device_shell_ws(live)
+        await ws.send(cmd + "\n")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and em_emos_update.OK not in buf:
+            try:
+                msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            except asyncio.TimeoutError:
+                continue
+            buf += (msg.decode("utf-8", errors="replace")
+                    if isinstance(msg, bytes) else msg)
+    except Exception as e:
+        log.warning(f"[api] [{device_id}] emOS shell step did not finish: {e}")
+    finally:
+        await _release_shell_ws(device_id, live)
+    await asyncio.sleep(1.0)        # let the session close before the next
+    return buf
+
+
+class _EmosIO:
+    """What em_emos_update.run_update needs from the controller."""
+
+    def __init__(self, device_id: str, live, override: tuple | None):
+        self.device_id, self.live, self.override = device_id, live, override
+
+    async def sh(self, cmd: str, timeout: float) -> str:
+        return await _emos_sh(self.live, cmd, timeout)
+
+    async def send(self, data: bytes, dest: str) -> str:
+        sent = await _stream_file_to_device(self.live, data, dest, mode="600",
+                                            require_verify=True)
+        await asyncio.sleep(1.0)
+        return "" if sent else str(sent)
+
+    async def payload(self, arch: str) -> tuple:
+        if self.override is not None:
+            init_bin, sbin, version, err = _select_emos_payload(
+                self.override[0], arch, self.override[1])
+        else:
+            init_bin, sbin, version, err = await _fetch_emos_payload(arch)
+        if err is not None:
+            try:
+                reason = json.loads(err.text)["error"]
+            except Exception:
+                reason = "the emOS release could not be fetched"
+            raise em_emos_update.Refused(reason + em_emos_update.UNCHANGED)
+        return init_bin, sbin, version
+
+    async def offload(self, fn, *args):
+        # Gzipping a ramdisk and hashing two images blocks the loop for long
+        # enough to matter while other devices stream audio through it.
+        return await asyncio.get_event_loop().run_in_executor(None, fn, *args)
+
+    async def step(self, msg: str, log: bool = True) -> None:
+        _emos_update_stage[self.device_id] = msg
+        if log:
+            await _push_log_event(self.device_id, "info", "controller",
+                                  f"emOS update: {msg}")
+
+    async def record(self, version, build) -> None:
+        em_dbwriter.submit(db.set_device_emos, self.device_id, version, build)
+
+    async def sleep(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+
+    def now(self) -> float:
+        return time.monotonic()
+
+    def relink(self) -> str:
+        current = _devices.get(self.device_id)
+        if current is self.live:
+            return "same"
+        if current is None:
+            return "gone"
+        self.live = current
+        return "new"
+
+
+async def _run_emos_update_locked(device_id: str, override: tuple | None) -> None:
+    live = _devices.get(device_id)
+    if live is None:
+        return await _emos_update_failed(
+            device_id, "the device disconnected before the update started")
+    try:
+        version = await em_emos_update.run_update(
+            _EmosIO(device_id, live, override))
+    except em_emos_update.Refused as e:
+        return await _emos_update_failed(device_id, str(e))
+    _emos_update_errors.pop(device_id, None)
+    await _push_log_event(device_id, "info", "controller",
+                          f"✓ emOS update confirmed: {version}")
+    await _push_event({"type": "device_emos_updated",
+                       "device_id": device_id, "version": version})
+
+
+async def _emos_status_on_connect(live, device_id: str) -> None:
+    """Record which emOS a connected device runs, and settle a trial mark the
+    update task is no longer around to settle (em_emos_update.settle_on_connect)."""
+    if _emos_update_busy(device_id):
+        return
+    sh = lambda cmd, timeout: _emos_sh(live, cmd, timeout)
+    st, verdict = await em_emos_update.settle_on_connect(sh)
+    if not st and _devices.get(device_id) is live:
+        await asyncio.sleep(CRASH_LOG_RETRY_S)      # shell plane not up yet
+        if _devices.get(device_id) is live and not _emos_update_busy(device_id):
+            st, verdict = await em_emos_update.settle_on_connect(sh)
+    if not st:
+        return
+    em_dbwriter.submit(db.set_device_emos, device_id, st["version"], st["build"])
+    if verdict == "confirm":
+        await _push_log_event(device_id, "info", "controller",
+                              f"✓ emOS update confirmed: {st['version']}")
+    elif verdict == "rolled_back":
+        await _push_log_event(
+            device_id, "warn", "controller",
+            f"emOS update to {st['mark'].get('version', '?')} was rolled "
+            f"back: the Echo is running {st['version']}")
 
 
 # ─── Shell helpers ────────────────────────────────────────────────────────────
@@ -3195,6 +3507,8 @@ async def _get_latest_release(request: web.Request) -> web.Response:
 async def _post_check_release(request: web.Request) -> web.Response:
     """POST /api/releases/check — force re-poll GitHub."""
     release = await _fetch_latest_release(force=True)
+    # Same button, same question: the Updates tab shows emOS beside firmware.
+    await _fetch_latest_emos_release()
     if release is None:
         return _error("no_release", "Could not fetch release from GitHub", 502)
     return _ok(release)
@@ -4618,6 +4932,12 @@ async def reconcile_on_connect(device_id: str, live) -> None:
             await _collect_crash_log(live, device_id)
         except Exception as e:
             log.warning(f"[api] [{device_id}] crash log check failed ({e})")
+        # Not debounced either: an image on trial has TRIAL_SECS to be
+        # confirmed, and this is what confirms it after a controller restart.
+        try:
+            await _emos_status_on_connect(live, device_id)
+        except Exception as e:
+            log.warning(f"[api] [{device_id}] emOS status check failed ({e})")
     if not _reconcile_due(device_id, time.monotonic()):
         return
 
@@ -5151,6 +5471,18 @@ async def _post_provision_diagnostics(request: web.Request) -> web.Response:
     )
 
 
+def _remember_emos_latest(tag: str) -> None:
+    global _emos_latest
+    if tag and tag != _emos_latest:
+        _emos_latest = tag
+        em_dbwriter.submit(db.set_config, "latest_emos_version", tag)
+
+
+def _emos_latest_version() -> str:
+    """The newest emOS release last seen, with no network call."""
+    return _emos_latest or db.get_config("latest_emos_version", "") or ""
+
+
 async def _fetch_latest_emos_release() -> Optional[dict]:
     """
     The newest published emOS release carrying an `init` asset.
@@ -5195,6 +5527,7 @@ async def _fetch_latest_emos_release() -> Optional[dict]:
             continue
         # Every asset by name. There are two inits — one per kernel
         # architecture — so picking one here would be picking for the caller.
+        _remember_emos_latest(tag)
         return {
             "version": tag,
             "assets": {n: {"url": a["browser_download_url"],
@@ -5295,7 +5628,15 @@ async def _fetch_emos_payload(arch: str) -> tuple:
             "bad_release_asset",
             f"The payload in emOS release {version} is not usable: {e}", 502)
 
-    files = payload["files"]
+    return _select_emos_payload(payload["files"], arch, version)
+
+
+def _select_emos_payload(files: dict, arch: str, version: str) -> tuple:
+    """Pick the init and /sbin tools for `arch` out of a bundle's files.
+
+    Split from _fetch_emos_payload so an uploaded bundle (the emOS update's
+    dev path) is selected from by the same rules as a release.
+    """
     init_name = EMOS_INIT_ASSETS.get(arch,
                                      EMOS_INIT_ASSETS[em_emos_build.ARCH_ARM64])
     init = files.get(init_name)
@@ -5826,6 +6167,11 @@ async def release_poll_loop() -> None:
         except Exception as e:
             log.error(f"[api] Controller release poll error: {e}")
 
+        try:
+            await _fetch_latest_emos_release()
+        except Exception as e:
+            log.error(f"[api] emOS release poll error: {e}")
+
         # Floor of 1s so even an absurd tiny positive interval cannot spin
         # the loop faster than the event loop allows.
         await asyncio.sleep(max(interval, 1))
@@ -6244,6 +6590,19 @@ def _merge_device(row, boot: dict | None = None) -> dict:
             "ambient_light" in (getattr(live, "capabilities", []) or []) if live else False,
         # WiFi change state (survives the reconnect a change causes)
         "wifi":             wifi_state(device_id),
+        # The emOS image it runs (schema v30), and whether the newest release
+        # is an update for it — decided here so the panel and the endpoint
+        # that refuses cannot disagree.
+        "emosVersion":      row["emos_version"],
+        "emosLatest":       _emos_latest_version() or None,
+        "emosUpdateAvailable": em_emos_update.update_available(
+            row["emos_version"], _emos_latest_version()),
+        "emosOffer":        em_emos_update.offer(
+            row["emos_version"], _emos_latest_version()),
+        "emos_update_in_progress": device_id in _emos_updates_in_progress,
+        "emos_update_queued":      device_id in _emos_updates_queued,
+        "emos_update_stage":       _emos_update_stage.get(device_id),
+        "emos_update_error":       _emos_update_errors.get(device_id),
         # Update state
         "update_in_progress": device_id in _updates_in_progress,
         # Waiting on the global OTA lock — started, but nothing has been sent

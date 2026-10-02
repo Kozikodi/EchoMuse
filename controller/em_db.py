@@ -1107,6 +1107,18 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '29' WHERE key = 'schema_version';
     """,
+
+    # v30 — the emOS image a device is running: VERSION_ID and BUILD_ID from
+    # its /etc/os-release. Stored for the reason base_os is (v21): "is there
+    # an emOS update" is asked about devices that are mostly offline. NULL on
+    # FireOS and until an emOS device has been asked, which is "unknown" and
+    # is never offered an update.
+    """
+    ALTER TABLE devices ADD COLUMN emos_version TEXT;
+    ALTER TABLE devices ADD COLUMN emos_build TEXT;
+
+    UPDATE system_config SET value = '30' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1723,6 +1735,17 @@ def set_device_base_os(device_id: str, base_os: Optional[str]) -> None:
         conn.execute(
             "UPDATE devices SET base_os = ? WHERE device_id = ?",
             (base_os, device_id),
+        )
+
+
+def set_device_emos(device_id: str, version: Optional[str],
+                    build: Optional[str]) -> None:
+    """Record the emOS image a device is running (schema v30)."""
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE devices SET emos_version = ?, emos_build = ? "
+            "WHERE device_id = ?",
+            (version, build, device_id),
         )
 
 

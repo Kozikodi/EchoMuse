@@ -1061,6 +1061,7 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 |------|------|
 | `em_controller.py` | WebSocket server, `Device` registry, voice pipeline, mDNS |
 | `em_api.py` | aiohttp HTTP API + dashboard SPA, OTA, shell proxy |
+| `em_emos_update.py` | Updating emOS in place: the checks, the device commands and the sequence, against an `io` the tests can stand in for. Pure |
 | `em_db.py` | SQLite persistence (devices, config, logs, users) |
 | `em_auth.py` | Session auth with bcrypt |
 | `em_eq.py` | Parametric EQ applied to TTS and music before playback; also hosts the chain, calling the guard and limiter in order |
@@ -1605,6 +1606,85 @@ Device-side payloads the controller distributes (`start_server.sh` via `/api/pro
 **Every payload needs an update path, and `tests/test_deploy.py` enforces it** (a file in `device_payloads/` unreferenced by `em_api.py` fails CI). The debloat pair had none until 2026-07-30 and every fielded device needed a manual push. `_sync_debloat` also rides the OTA and reconciles **both** halves — the boot script by md5, and the `pm hide` list by asking the device which listed packages are still visible — because round 2 added a *package* and a script-only sync would have looked like it worked while changing nothing. It is additionally exposed as `POST /api/devices/{id}/debloat` (Updates tab → Maintenance), which is **required, not a convenience**: the OTA path cannot reach a device already on the latest firmware. Two traps in that reconcile, both of which produced confident wrong answers: match package names with `grep -qx` (whole line) — an unanchored `*package:$p*` also matches `package:$p.client` — and never treat `pm list packages -u` minus `pm list packages` as the hidden count, since it includes uninstalled packages.
 
 `com.amazon.whad` is `PERSISTENT`: `pm disable` is ignored, **`am force-stop` is a no-op**, and `pm hide` does not stop a running instance — it stays until the next reboot, which is why the log line says so. Note RSS overstates the win ~6x (shared zygote pages): the measured recovery is ~20-35MB per device by `memUsedMb`, not the 62MB RSS suggests.
+
+## emOS update (`em_emos_update.py`, #573)
+
+**An emOS device is updated over the network by REBUILDING its own image**,
+because the image cannot be shipped: it carries the device's kernel and DTBs.
+The controller reads the running image off `mmcblk0p10` over the shell plane,
+keeps its kernel, load addresses and cmdline byte for byte, swaps the ramdisk
+for one built from the release's init, and writes it back. Offered per device
+on the Updates tab (`emosUpdateAvailable`, decided server-side), queued behind
+`_ota_lock` like firmware, `POST /api/devices/{id}/emos_update`.
+
+**amonet 1 and 2 take the same path**, and that is the point of rebuilding from
+the running image rather than from stock: the kernel architecture and the
+`emos.system=` stamp (or its absence on v1) are already inside it and are
+carried across untouched. Nothing asks which amonet a device has.
+
+`em_emos_update.run_update(io)` is the whole sequence, written against a small
+`io` so it runs in `tests/test_emos_update_flow.py` against a simulated device
+whose commands are executed by a REAL shell with busybox. `em_api._EmosIO` is
+the real carrier and decides nothing. That test found two things no reading
+would have: `dd` without `conv=notrunc`, and that not every busybox has
+`base64` (Ubuntu's does not), which is why preflight probes each tool by
+running it.
+
+The gates, in order, and what each is for:
+
+- **Preflight refuses an unconfirmed boot** (`boot.state` not 0): init is still
+  deciding about the running image, and replacing it would hide the answer.
+- **The image read must BE the running image** (`reference_problems`): its
+  ramdisk's os-release must match what the device reports, and its stored id
+  must match its contents. On OUR images a wrong id is damage, unlike a stock
+  reference, where f1r30s leaves a stale one.
+- **`boot-good.img` must equal the running image by md5 before anything is
+  written**, and is refreshed if not. Otherwise a rollback lands on whatever
+  was confirmed last, which may be two versions back.
+- **The init must contain the trial mark's path** (`init_supports_trial`).
+  Asked of the binary, not of the version, so a local build is judged the same
+  way as a release. `MIN_TARGET` (0.10) is only for OFFERING, where there is no
+  binary to ask.
+- **`built_problems`**: the kernel and cmdline are identical to what was read,
+  the id is new (init promotes `boot-good.img` on an id change — #573's first
+  question), and the image fits the partition.
+- **The write is read back after `drop_caches`.** A reply that never arrived
+  (the link dropped mid-`dd`) is settled by asking the flash again, not assumed
+  either way. A write that does not verify is undone from `boot-good.img` on
+  the spot, while the old init is still the one running.
+
+**The trial mark is what makes it safe unattended** (`/data/emos/update.pending`,
+init from 0.10, `emos/init/trialcheck.c`). init's own rollback counts boots and
+confirms at network-up, which leaves two holes when nobody is at the device: an
+image with broken WiFi never reboots to be counted, and an image that gets an
+address but cannot run the firmware is promoted. So the controller writes the
+new image's id to the mark before flashing and removes it once the device has
+re-registered on that build; until then init does not confirm, reboots at 180s,
+and restores the old image after three tries (~10 min, hence `WATCH_S`). **A
+controller that is down through that window costs a good update its place** —
+it is rolled back and has to be retried. That was chosen over promoting an
+image nobody could reach (Wil, 2026-10-02).
+
+**Confirmation is stateless on purpose.** `_emos_status_on_connect` runs for
+every emOS connect, not debounced: the mark carries the build it was written
+for, so a controller that restarted mid-update still confirms. It also stores
+`emos_version`/`emos_build` (schema v30) — read over the shell plane rather
+than added to the register message, because the mark needs that round trip
+anyway and it works on every fielded firmware.
+
+**A redial is told from a restart by kernel uptime.** The old build on a new
+connection is a rollback only if the kernel has NOT been up since before the
+restart was asked for; otherwise it never restarted, and the mark is left so
+the trial still applies when it does.
+
+**What it cannot recover** is an image that fails before init runs, which
+needs TWRP and a cable. A power cut during the ~1s write lands there. The
+identical-kernel check and the read-back exist to make that the only way in.
+
+Not built yet: a manual roll-back button, emOS in the fleet "update all", and
+checking the release's attestation before use (firmware does not either).
+`POST /api/emos/upload` takes a locally built `emos-payload.zip`, as Local
+Build does for firmware.
 
 ## Provisioning wizard (`dashboard.jsx`, `_WIZARD_STEPS`)
 
