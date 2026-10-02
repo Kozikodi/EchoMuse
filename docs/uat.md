@@ -417,6 +417,27 @@ tell you to update — it must never update itself.
 **Flag:** A notice with empty notes; or any button that claims to perform the
 update.
 
+### J4 · emOS update is offered (emOS Echoes only)
+**Do:** On an Echo running emOS, Device → **Updates**.
+**Expect:** An **emOS** panel under Firmware with the version on the device
+and the newest release. Update is offered only when the release is newer, and
+a release older than 0.10 reads as installing with the wizard. An Echo on
+FireOS has no emOS panel.
+**Flag:** "Up to date" on an Echo that is behind; an emOS panel on a FireOS
+Echo; "Version not read yet" on an Echo that has been connected for a minute.
+
+### J5 · **Destructive** — apply an emOS update
+**Do:** Press Update and confirm. Keep the Echo powered. Watch the log under
+the panels.
+**Expect:** Checking, reading the running image, building, sending, writing,
+restarting — then "running and confirmed" about a minute after the restart.
+The panel shows the new version and the Echo keeps its WiFi and settings.
+**Flag:** Any step that says something was changed and then fails; an Echo
+that comes back on the old version without the log saying it rolled back.
+**Do not unplug it during "Writing the boot partition".** If it has not
+returned after fifteen minutes, say so in the report before touching it; an
+amber ring means it is restoring the previous image by itself.
+
 ---
 
 ## K — The dashboard

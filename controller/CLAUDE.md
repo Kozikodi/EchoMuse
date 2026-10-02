@@ -1696,6 +1696,13 @@ busybox takes `dd conv=notrunc,fsync`.
 needs TWRP and a cable. A power cut during the ~1s write lands there. The
 identical-kernel check and the read-back exist to make that the only way in.
 
+**`emos-v0.10` was tagged the same night** and is the first release the panel
+offers. The rollback RECORD was added after that hardware run and went out
+without one (Wil, 2026-10-02); the rollback itself was run. Exercise it with
+`echo 3 > /data/emos/boot.state` and a restart on a 0.10 device: init rewrites
+its own image and the controller should log the "rewrote its known-good
+image" line.
+
 Not built yet: a manual roll-back button, emOS in the fleet "update all", and
 checking the release's attestation before use (firmware does not either).
 `POST /api/emos/upload` takes a locally built `emos-payload.zip`, as Local
