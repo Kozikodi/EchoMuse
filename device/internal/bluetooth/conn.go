@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -226,6 +227,27 @@ func (m *ConnManager) detach() {
 			m.OnDisconnect(c.addr, hciReasonLocalHost)
 		}
 	}
+}
+
+// Connected lists the addresses of the links that are up, sorted.
+func (m *ConnManager) Connected() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.conns))
+	for _, c := range m.conns {
+		out = append(out, c.addr)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// normaliseAddr puts an address in the one spelling the manager keys on.
+func normaliseAddr(addr string) (string, bool) {
+	mac, err := net.ParseMAC(addr)
+	if err != nil || len(mac) != 6 {
+		return "", false
+	}
+	return mac.String(), true
 }
 
 // Slots reports free and total connection slots.
@@ -598,19 +620,21 @@ func (m *ConnManager) Connect(addr string, addrType int) (ConnInfo, error) {
 	pending := make(chan connComplete, 1)
 	m.mu.Lock()
 	h := m.host
-	switch {
-	case h == nil:
+	if h == nil {
 		m.mu.Unlock()
 		return ConnInfo{}, ErrNotRunning
-	case len(m.conns) >= MaxConnSlots:
-		m.mu.Unlock()
-		return ConnInfo{}, ErrNoSlots
 	}
+	// Before the slot count: with every slot taken, "already connected" is
+	// the more useful answer about an address that holds one of them.
 	for _, c := range m.conns {
 		if c.addr == addr {
 			m.mu.Unlock()
 			return ConnInfo{}, ErrAlreadyConnected
 		}
+	}
+	if len(m.conns) >= MaxConnSlots {
+		m.mu.Unlock()
+		return ConnInfo{}, ErrNoSlots
 	}
 	m.pending, m.pendingAddr = pending, addr
 	ownType := 0
