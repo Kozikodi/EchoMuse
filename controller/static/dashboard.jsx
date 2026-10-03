@@ -10040,7 +10040,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Bluetooth proxy" sub="passive BLE scan → HA (Bermuda, BLE sensors)" value={config.bleProxyEnabled ?? false} onChange={v => set('bleProxyEnabled', v)}/>
           <Toggle label="Allow connections"
-            sub={bleConnectCapable ? 'HA connects to locks and sensors; needs a key' : 'needs newer firmware on this Echo'}
+            sub={bleConnectCapable ? 'proxy goes offline in HA until you enter its key' : 'needs newer firmware on this Echo'}
             disabled={!bleConnectCapable || !(config.bleProxyEnabled ?? false)}
             value={config.bleProxyConnections ?? false}
             onChange={v => set('bleProxyConnections', v)}/>
