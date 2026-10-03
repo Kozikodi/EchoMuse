@@ -52,6 +52,9 @@ func main() {
 	hold := flag.Int("hold", 60, "GATT probe: seconds to hold the links")
 	readEvery := flag.Int("read-every", 0, "GATT probe: re-read Device Name this often while holding, ms (0 = idle)")
 	holdScan := flag.Bool("hold-scan", false, "GATT probe: passive scan while holding")
+	discover := flag.Bool("discover", false, "GATT probe: discover the peer's services and read what is readable")
+	notify := flag.Bool("notify", false, "GATT probe: with -discover, subscribe to notifications")
+	write := flag.String("write", "", "GATT probe: with -discover, uuid-substring:hex to write")
 	flag.Parse()
 
 	if *list > 0 {
@@ -59,7 +62,7 @@ func main() {
 		return
 	}
 	if *connect != "" {
-		runGatt(*connect, *connInterval, *hold, *readEvery, *holdScan)
+		runGatt(*connect, *connInterval, *hold, *readEvery, *holdScan, *discover, *notify, *write)
 		return
 	}
 

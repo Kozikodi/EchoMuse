@@ -21,9 +21,11 @@ package bluetooth
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -173,6 +175,9 @@ type GattOptions struct {
 	Hold           time.Duration
 	ReadEvery      time.Duration // 0 holds the links idle
 	Scan           bool          // passive scan while holding, as the proxy would
+	Discover       bool          // walk the peer's table with DiscoverServices and read what is readable
+	Notify         bool          // with Discover: subscribe to every notifying characteristic
+	Write          string        // with Discover: "uuid-substring:hex", written with response
 	Logf           func(format string, args ...any)
 }
 
@@ -190,6 +195,8 @@ type GattConn struct {
 	ReadRttMs     []float64 `json:"readRttMs,omitempty"`
 	Dropped       string    `json:"dropped,omitempty"` // HCI reason, if the link fell during the run
 	PeerAsked     []string  `json:"peerAsked,omitempty"`
+	Table         []string  `json:"table,omitempty"` // discovery, one line per attribute
+	Notified      int       `json:"notified"`
 
 	handle     uint16
 	live       bool
@@ -340,13 +347,17 @@ func (s *gattSession) onL2CAP(h, cid uint16, p []byte) {
 		case op == attMTUReq:
 			asked("att mtu")
 			s.f.Write(buildACL(h, cidATT, []byte{attMTURsp, attMTUMin, 0}))
-		case op == attIndication:
-			s.f.Write(buildACL(h, cidATT, []byte{attConfirmation}))
-		case op == attError || op&0x01 == 1:
-			// Error, a response, or a notification (0x1B).
-			if op != 0x1B {
-				c.resp = append([]byte(nil), p...)
+		case op == attOpNotification || op == attIndication:
+			if nh, v, _, ok := parseHandleValue(p); ok {
+				c.Notified++
+				s.logf("%s notified handle 0x%04x: % x %q", c.Addr, nh, v, v)
 			}
+			if op == attIndication {
+				s.f.Write(buildACL(h, cidATT, []byte{attConfirmation}))
+			}
+		case op == attError || op&0x01 == 1:
+			// Error or a response.
+			c.resp = append([]byte(nil), p...)
 		case op&0x40 == 0:
 			// A request we do not serve: Request Not Supported.
 			asked(fmt.Sprintf("att request 0x%02x", op))
@@ -369,8 +380,28 @@ func (s *gattSession) onL2CAP(h, cid uint16, p []byte) {
 	}
 }
 
-// att sends one request and waits for the peer's answer on that connection.
+// benchRequester puts DiscoverServices on a live connection.
+type benchRequester struct {
+	s *gattSession
+	c *GattConn
+}
+
+func (r benchRequester) Request(req []byte) ([]byte, error) { return r.s.attRaw(r.c, req) }
+
+// att is attRaw with an Error Response turned into an error.
 func (s *gattSession) att(c *GattConn, req []byte) ([]byte, error) {
+	rsp, err := s.attRaw(c, req)
+	if err != nil {
+		return nil, err
+	}
+	if rsp[0] == attError {
+		return nil, fmt.Errorf("att error % x", rsp)
+	}
+	return rsp, nil
+}
+
+// attRaw sends one request and waits for the peer's answer on that connection.
+func (s *gattSession) attRaw(c *GattConn, req []byte) ([]byte, error) {
 	c.resp = nil
 	if _, err := s.f.Write(buildACL(c.handle, cidATT, req)); err != nil {
 		return nil, err
@@ -388,10 +419,60 @@ func (s *gattSession) att(c *GattConn, req []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
-	if c.resp[0] == attError {
-		return nil, fmt.Errorf("att error % x", c.resp)
-	}
 	return c.resp, nil
+}
+
+// explore runs the production discovery against the peer, then reads,
+// subscribes and writes as asked, recording one line per attribute.
+func (s *gattSession) explore(c *GattConn, o GattOptions) {
+	services, err := DiscoverServices(benchRequester{s, c})
+	if err != nil {
+		c.Table = append(c.Table, "discovery failed: "+err.Error())
+		return
+	}
+	wantUUID, wantHex, _ := strings.Cut(o.Write, ":")
+	for _, sv := range services {
+		c.Table = append(c.Table, fmt.Sprintf("service %s 0x%04x-0x%04x", sv.UUID, sv.Start, sv.End))
+		for _, ch := range sv.Characteristics {
+			line := fmt.Sprintf("  char %s props 0x%02x value 0x%04x", ch.UUID, ch.Properties, ch.ValueHandle)
+			if ch.Properties&0x02 != 0 && c.live {
+				rsp, err := s.attRaw(c, encodeReadReq(ch.ValueHandle))
+				if err != nil {
+					line += " read: " + err.Error()
+				} else if v, err := parseReadRsp(attOpReadReq, rsp); err != nil {
+					line += " read: " + err.Error()
+				} else {
+					line += fmt.Sprintf(" = % x %q", v, v)
+				}
+			}
+			c.Table = append(c.Table, line)
+			for _, d := range ch.Descriptors {
+				dl := fmt.Sprintf("    desc %s 0x%04x", d.UUID, d.Handle)
+				if o.Notify && d.UUID.Is16(0x2902) && ch.Properties&0x30 != 0 && c.live {
+					v := []byte{0x01, 0x00}
+					if ch.Properties&0x10 == 0 {
+						v = []byte{0x02, 0x00} // indicate only
+					}
+					rsp, err := s.attRaw(c, encodeWriteReq(d.Handle, v))
+					if err == nil {
+						err = parseWriteRsp(rsp)
+					}
+					dl += fmt.Sprintf(" subscribe: %v", err)
+				}
+				c.Table = append(c.Table, dl)
+			}
+			if wantUUID != "" && strings.Contains(ch.UUID.String(), strings.ToLower(wantUUID)) && c.live {
+				v, err := hex.DecodeString(wantHex)
+				if err == nil {
+					var rsp []byte
+					if rsp, err = s.attRaw(c, encodeWriteReq(ch.ValueHandle, v)); err == nil {
+						err = parseWriteRsp(rsp)
+					}
+				}
+				c.Table = append(c.Table, fmt.Sprintf("  wrote % x to 0x%04x: %v", v, ch.ValueHandle, err))
+			}
+		}
+	}
 }
 
 func (s *gattSession) connect(t GattTarget, intervalMs int) error {
@@ -530,6 +611,14 @@ func GattProbe(o GattOptions) (GattResult, error) {
 		}
 	}
 
+	if o.Discover {
+		for _, c := range s.conns {
+			if c.live {
+				s.explore(c, o)
+			}
+		}
+	}
+
 	s.adverts = 0
 	if o.Scan {
 		if _, err := s.cmd(opLESetScanParams, scanParams(320, 30)); err == nil {
@@ -600,6 +689,7 @@ type Seen struct {
 	Rssi        int    `json:"rssi"`
 	Name        string `json:"name,omitempty"`
 	Company     string `json:"company,omitempty"` // manufacturer data company id
+	Services    string `json:"services,omitempty"`
 	Adverts     int    `json:"adverts"`
 }
 
@@ -677,6 +767,18 @@ loop:
 					switch ad[1] {
 					case 0x08, 0x09:
 						e.Name = string(val)
+					case 0x02, 0x03:
+						for ; len(val) >= 2; val = val[2:] {
+							if u := fmt.Sprintf("%04x ", binary.LittleEndian.Uint16(val)); !strings.Contains(e.Services, u) {
+								e.Services += u
+							}
+						}
+					case 0x06, 0x07:
+						for ; len(val) >= 16; val = val[16:] {
+							if u := UUID(val[:16]).String() + " "; !strings.Contains(e.Services, u) {
+								e.Services += u
+							}
+						}
 					case 0xFF:
 						if len(val) >= 2 {
 							e.Company = fmt.Sprintf("0x%04x", binary.LittleEndian.Uint16(val[0:2]))

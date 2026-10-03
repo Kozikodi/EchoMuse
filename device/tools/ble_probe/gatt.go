@@ -30,7 +30,7 @@ func runList(seconds int) {
 
 // runGatt drives bluetooth.GattProbe and prints one JSON result, with each
 // connection's read round trips reduced to a median and a maximum.
-func runGatt(peers string, intervalMs, hold, readEveryMs int, scan bool) {
+func runGatt(peers string, intervalMs, hold, readEveryMs int, scan, discover, notify bool, write string) {
 	var targets []bluetooth.GattTarget
 	for _, item := range strings.Split(peers, ",") {
 		addr, typ, _ := strings.Cut(item, "/")
@@ -47,6 +47,9 @@ func runGatt(peers string, intervalMs, hold, readEveryMs int, scan bool) {
 		Hold:           time.Duration(hold) * time.Second,
 		ReadEvery:      time.Duration(readEveryMs) * time.Millisecond,
 		Scan:           scan,
+		Discover:       discover,
+		Notify:         notify,
+		Write:          write,
 		Logf:           log.Printf,
 	})
 	type rtt struct {

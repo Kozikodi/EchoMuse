@@ -12,6 +12,6 @@ func runList(int) {
 	log.Fatal("-list needs a build with -tags bench")
 }
 
-func runGatt(string, int, int, int, bool) {
+func runGatt(string, int, int, int, bool, bool, bool, string) {
 	log.Fatal("-connect needs a build with -tags bench")
 }
