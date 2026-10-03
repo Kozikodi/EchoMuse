@@ -10074,6 +10074,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
 // Home Assistant asks for once connections are on (the proxy's port requires
 // it from then). Fetched on request and never kept, like the Sendspin token.
 function BleProxyKey({ deviceId, status, isAdmin }) {
+  const mono = "'DM Mono',monospace";
   const [key, setKey] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
