@@ -30,23 +30,11 @@ import (
 )
 
 const (
-	evtDisconnectComplete = 0x05
+	opReadLocalVersion = 0x04<<10 | 0x0001
+	opLEReadFeatures   = 0x08<<10 | 0x0003
+	opLEReadWhiteList  = 0x08<<10 | 0x000F
+	opLEReadStates     = 0x08<<10 | 0x001C
 
-	leSubeventConnComplete   = 0x01
-	leSubeventConnUpdateDone = 0x03
-
-	opDisconnect         = 0x01<<10 | 0x0006
-	opReadLocalVersion   = 0x04<<10 | 0x0001
-	opLEReadBufferSize   = 0x08<<10 | 0x0002
-	opLEReadFeatures     = 0x08<<10 | 0x0003
-	opLECreateConn       = 0x08<<10 | 0x000D
-	opLECreateConnCancel = 0x08<<10 | 0x000E
-	opLEReadWhiteList    = 0x08<<10 | 0x000F
-	opLEReadStates       = 0x08<<10 | 0x001C
-
-	cidATT    = 0x0004
-	cidLESig  = 0x0005
-	cidSMP    = 0x0006
 	attMTUMin = 23
 
 	attError         = 0x01
@@ -62,105 +50,6 @@ const (
 	connectTimeout = 20 * time.Second
 	attTimeout     = 30 * time.Second // ATT transaction timeout, Vol 3 Part F 3.3.3
 )
-
-// buildACL frames one L2CAP PDU as a single HCI ACL packet (H4-framed), with
-// the first-fragment boundary flag an LE host must use (PB=00).
-func buildACL(handle, cid uint16, payload []byte) []byte {
-	pkt := make([]byte, 9+len(payload))
-	pkt[0] = h4TypeACL
-	binary.LittleEndian.PutUint16(pkt[1:3], handle&0x0FFF)
-	binary.LittleEndian.PutUint16(pkt[3:5], uint16(4+len(payload)))
-	binary.LittleEndian.PutUint16(pkt[5:7], uint16(len(payload)))
-	binary.LittleEndian.PutUint16(pkt[7:9], cid)
-	copy(pkt[9:], payload)
-	return pkt
-}
-
-// aclReassembler rebuilds L2CAP PDUs from ACL fragments, per connection.
-type aclReassembler struct {
-	partial map[uint16][]byte
-}
-
-// Feed takes one H4-framed ACL packet and returns a complete PDU when this
-// fragment finishes one. A continuation with nothing started is dropped.
-func (r *aclReassembler) Feed(pkt []byte) (handle, cid uint16, payload []byte, ok bool) {
-	if len(pkt) < 5 || pkt[0] != h4TypeACL {
-		return 0, 0, nil, false
-	}
-	hf := binary.LittleEndian.Uint16(pkt[1:3])
-	handle = hf & 0x0FFF
-	data := pkt[5:]
-	if r.partial == nil {
-		r.partial = map[uint16][]byte{}
-	}
-	if pb := (hf >> 12) & 0x3; pb == 0x1 {
-		if r.partial[handle] == nil {
-			return 0, 0, nil, false
-		}
-		r.partial[handle] = append(r.partial[handle], data...)
-	} else {
-		r.partial[handle] = append([]byte(nil), data...)
-	}
-	buf := r.partial[handle]
-	if len(buf) < 4 {
-		return 0, 0, nil, false
-	}
-	n := int(binary.LittleEndian.Uint16(buf[0:2]))
-	if len(buf) < 4+n {
-		return 0, 0, nil, false
-	}
-	delete(r.partial, handle)
-	return handle, binary.LittleEndian.Uint16(buf[2:4]), buf[4 : 4+n], true
-}
-
-// createConnParams builds LE Create Connection for one peer. The interval is
-// in ms (spec units of 1.25ms); supervision timeout is fixed at 5s.
-func createConnParams(peer net.HardwareAddr, peerType, intervalMs int) []byte {
-	iv := uint16(intervalMs * 100 / 125)
-	if iv < 6 {
-		iv = 6
-	}
-	if iv > 3200 {
-		iv = 3200
-	}
-	p := make([]byte, 25)
-	binary.LittleEndian.PutUint16(p[0:2], 0x0060) // scan interval 60ms
-	binary.LittleEndian.PutUint16(p[2:4], 0x0030) // scan window 30ms
-	p[4] = 0x00                                   // no white list
-	p[5] = byte(peerType)
-	for i := 0; i < 6; i++ {
-		p[6+i] = peer[5-i]
-	}
-	p[12] = 0x00 // own address: public
-	binary.LittleEndian.PutUint16(p[13:15], iv)
-	binary.LittleEndian.PutUint16(p[15:17], iv)
-	binary.LittleEndian.PutUint16(p[17:19], 0)   // latency
-	binary.LittleEndian.PutUint16(p[19:21], 500) // supervision timeout, 10ms units
-	return p
-}
-
-// connComplete is an LE Connection Complete event.
-type connComplete struct {
-	status     byte
-	handle     uint16
-	intervalMs float64
-	latency    int
-	timeoutMs  int
-}
-
-func parseConnComplete(pkt []byte) (connComplete, bool) {
-	if len(pkt) < 22 || pkt[0] != h4TypeEvent || pkt[1] != evtLEMeta || pkt[3] != leSubeventConnComplete {
-		return connComplete{}, false
-	}
-	p := pkt[3:]
-	return connComplete{
-		status:     p[1],
-		handle:     binary.LittleEndian.Uint16(p[2:4]) & 0x0FFF,
-		intervalMs: float64(binary.LittleEndian.Uint16(p[12:14])) * 1.25,
-		latency:    int(binary.LittleEndian.Uint16(p[14:16])),
-		timeoutMs:  int(binary.LittleEndian.Uint16(p[16:18])) * 10,
-	}, true
-}
 
 // GattTarget is one peer to connect to.
 type GattTarget struct {
@@ -484,7 +373,7 @@ func (s *gattSession) connect(t GattTarget, intervalMs int) error {
 	}
 	t0 := time.Now()
 	s.pending = nil
-	if cc, err := s.cmd(opLECreateConn, createConnParams(mac, t.AddrType, intervalMs)); err != nil {
+	if cc, err := s.cmd(opLECreateConn, createConnParams(mac, t.AddrType, 0, intervalMs)); err != nil {
 		c.ConnectStatus = fmt.Sprintf("0x%02x", cc.status)
 		return nil
 	}

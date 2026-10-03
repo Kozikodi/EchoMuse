@@ -1,5 +1,3 @@
-//go:build bench
-
 package bluetooth
 
 import (
@@ -56,11 +54,11 @@ func TestACLReassembly(t *testing.T) {
 
 func TestCreateConnParams(t *testing.T) {
 	mac, _ := net.ParseMAC("AA:BB:CC:DD:EE:FF")
-	p := createConnParams(mac, 1, 30)
+	p := createConnParams(mac, 1, 0, 30)
 	if len(p) != 25 {
 		t.Fatalf("len %d", len(p))
 	}
-	if p[5] != 1 || !bytes.Equal(p[6:12], []byte{0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA}) {
+	if p[5] != 1 || p[12] != 0 || !bytes.Equal(p[6:12], []byte{0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA}) {
 		t.Fatalf("peer % x", p[5:12])
 	}
 	// 30ms is 24 units of 1.25ms, min and max alike.
@@ -68,10 +66,10 @@ func TestCreateConnParams(t *testing.T) {
 		t.Fatalf("interval % x", p[13:17])
 	}
 	// Clamped to the spec's range: 7.5ms to 4s.
-	if lo := createConnParams(mac, 0, 1); lo[13] != 6 || lo[14] != 0 {
+	if lo := createConnParams(mac, 0, 1, 1); lo[13] != 6 || lo[14] != 0 || lo[12] != 1 {
 		t.Fatalf("low clamp % x", lo[13:15])
 	}
-	if hi := createConnParams(mac, 0, 60000); hi[13] != 0x80 || hi[14] != 0x0C {
+	if hi := createConnParams(mac, 0, 0, 60000); hi[13] != 0x80 || hi[14] != 0x0C {
 		t.Fatalf("high clamp % x", hi[13:15])
 	}
 }

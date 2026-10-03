@@ -55,8 +55,13 @@ func main() {
 	discover := flag.Bool("discover", false, "GATT probe: discover the peer's services and read what is readable")
 	notify := flag.Bool("notify", false, "GATT probe: with -discover, subscribe to notifications")
 	write := flag.String("write", "", "GATT probe: with -discover, uuid-substring:hex to write")
+	host := flag.String("host", "", "connect through the firmware's own scanner and connection manager: addr/type[,addr/type]; uses -hold and -write")
 	flag.Parse()
 
+	if *host != "" {
+		runHost(*host, *hold, *write)
+		return
+	}
 	if *list > 0 {
 		runList(*list)
 		return

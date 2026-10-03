@@ -152,6 +152,7 @@ type fakeServer struct {
 	mtu      int
 	lastEnd  uint16 // group end handle reported for the last service
 	requests int
+	notLong  bool // answer Read Blob on a short value with Attribute Not Long
 }
 
 func (s *fakeServer) add(typ UUID, value []byte) uint16 {
@@ -184,8 +185,53 @@ func (s *fakeServer) groupEnd(i int) uint16 {
 	return s.attrs[len(s.attrs)-1].handle
 }
 
+// value answers the read and write requests, on any attribute in the table.
+func (s *fakeServer) value(req []byte) ([]byte, bool) {
+	op := req[0]
+	if op != attOpReadReq && op != attOpReadBlobReq && op != attOpWriteReq && op != attOpWriteCmd {
+		return nil, false
+	}
+	if len(req) < 3 {
+		return attErrorRsp(op, 0, 0x04), true // Invalid PDU
+	}
+	h := binary.LittleEndian.Uint16(req[1:3])
+	if h == 0 || int(h) > len(s.attrs) {
+		return attErrorRsp(op, h, 0x01), true // Invalid Handle
+	}
+	a := &s.attrs[h-1]
+	switch op {
+	case attOpWriteReq, attOpWriteCmd:
+		a.value = append([]byte(nil), req[3:]...)
+		if op == attOpWriteCmd {
+			return nil, true
+		}
+		return []byte{attOpWriteRsp}, true
+	case attOpReadBlobReq:
+		off := int(binary.LittleEndian.Uint16(req[3:5]))
+		if s.notLong && len(a.value) <= s.mtu-1 {
+			return attErrorRsp(op, h, 0x0B), true // Attribute Not Long
+		}
+		if off > len(a.value) {
+			return attErrorRsp(op, h, 0x07), true // Invalid Offset
+		}
+		v := a.value[off:]
+		if len(v) > s.mtu-1 {
+			v = v[:s.mtu-1]
+		}
+		return append([]byte{attOpReadBlobRsp}, v...), true
+	}
+	v := a.value
+	if len(v) > s.mtu-1 {
+		v = v[:s.mtu-1]
+	}
+	return append([]byte{attOpReadRsp}, v...), true
+}
+
 func (s *fakeServer) Request(req []byte) ([]byte, error) {
 	s.requests++
+	if rsp, ok := s.value(req); ok {
+		return rsp, nil
+	}
 	if len(req) < 5 {
 		return attErrorRsp(req[0], 0, attErrReqNotSupport), nil
 	}
