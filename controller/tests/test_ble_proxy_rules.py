@@ -153,3 +153,12 @@ def test_frames_go_only_to_a_device_that_announced_it():
     assert "frameTypeBleGatt = byte(0x08)" in data
     import em_ble_gatt
     assert em_ble_gatt.FRAME_BLE_GATT == 0x08
+
+
+def test_a_rebuilt_proxy_asks_the_device_for_its_slots():
+    # The device reports its slots when the setting reaches it, which is
+    # before the controller has rebuilt the proxy that should hear it.
+    fn = _func("em_ble_proxy.py", "reconcile")
+    src = ast.unparse(fn)
+    assert "sync_slots(device_id)" in src
+    assert src.index("await proxy.start(_host)") < src.index("sync_slots(device_id)")

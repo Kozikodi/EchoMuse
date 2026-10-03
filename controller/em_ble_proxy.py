@@ -426,6 +426,14 @@ async def reconcile(device_id: str) -> None:
     # Listener tracks device presence, same as the voice satellite's port.
     if device_id in _online:
         await proxy.start(_host)
+        if proxy.connections and proxy.link.limit == 0:
+            # A proxy made just now has an empty link, and the device's own
+            # report of its slots was addressed to the one this replaced (it
+            # sends it the moment the setting reaches it, which is before the
+            # rebuild). Without asking again Home Assistant is told 0 of 0
+            # and never routes a connection here — found on the first real
+            # run, 2026-10-03.
+            em_tasks.spawn(sync_slots(device_id))
     else:
         await proxy.stop()
 

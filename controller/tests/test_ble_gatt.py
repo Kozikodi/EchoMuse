@@ -269,7 +269,9 @@ def test_a_whole_conversation():
         echo, link, proxy, sent, tasks = setup()
         assert proxy.handle(PB.SubscribeBluetoothConnectionsFreeRequest())
         assert (sent[0].free, sent[0].limit, sent[0].allocated) == (0, 0, [])
-        del sent[:]
+        await settle(tasks)                  # it asks the Echo, which answers 3 of 3
+        await asyncio.sleep(0)
+        del sent[:], echo.log[:]
 
         assert proxy.handle(connect_msg())
         await settle(tasks)
@@ -277,7 +279,7 @@ def test_a_whole_conversation():
         assert [(m.address, m.connected, m.mtu, m.error) for m in conn] == [(A_INT, True, 185, 0)]
         slots = [m for m in sent if isinstance(m, PB.BluetoothConnectionsFreeResponse)]
         assert (slots[-1].free, slots[-1].limit, slots[-1].allocated) == (2, 3, [A_INT])
-        assert echo.log[0] == {"t": "connect", "req": 1, "addr": A, "addr_type": 1}
+        assert echo.log[0] == {"t": "connect", "req": 2, "addr": A, "addr_type": 1}
         del sent[:]
 
         proxy.handle(PB.BluetoothGATTGetServicesRequest(address=A_INT))
@@ -321,6 +323,26 @@ def test_a_whole_conversation():
         link.feed(json.dumps({"t": "notify", "addr": A, "handle": 9, "value": "aGk="}).encode())
         await asyncio.sleep(0)
         assert sent == []
+    run(go())
+
+
+def test_home_assistant_is_never_left_believing_there_are_no_slots():
+    # The first real run: the Echo's slot report went to a proxy that was
+    # then rebuilt, the new link started at 0 of 0, and Home Assistant never
+    # sent a connection its way. A subscriber that finds nothing known asks.
+    async def go():
+        echo, link, proxy, sent, tasks = setup()
+        assert (link.free, link.limit) == (0, 0)
+        proxy.handle(PB.SubscribeBluetoothConnectionsFreeRequest())
+        await settle(tasks)
+        await asyncio.sleep(0)
+        slots = [(m.free, m.limit) for m in sent if isinstance(m, PB.BluetoothConnectionsFreeResponse)]
+        assert slots == [(0, 0), (3, 3)]
+        assert [m["t"] for m in echo.log] == ["slots"]
+        # Once known it is not asked again.
+        proxy.handle(PB.SubscribeBluetoothConnectionsFreeRequest())
+        await settle(tasks)
+        assert [m["t"] for m in echo.log] == ["slots"]
     run(go())
 
 

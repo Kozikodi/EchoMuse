@@ -266,6 +266,10 @@ class GattProxy:
         if isinstance(msg, pb.SubscribeBluetoothConnectionsFreeRequest):
             self._slots_subscribed = True
             self._send([self._slots_msg()])
+            if self.link.limit == 0:
+                # Nothing heard from the Echo yet. Home Assistant treats 0 of
+                # 0 as "no connections here", so ask rather than leave it.
+                self._spawn(self._ask_slots())
             return True
         if isinstance(msg, pb.BluetoothDeviceRequest):
             self._run(msg.address, self._device_request(msg))
@@ -302,6 +306,12 @@ class GattProxy:
         self._notify.clear()
         if self.link.on_notify == self._on_notify:
             self.link.on_notify = self.link.on_disconnected = self.link.on_slots = None
+
+    async def _ask_slots(self) -> None:
+        try:
+            await self.link.request("slots", timeout=10.0)
+        except GattError as e:
+            log.info(f"[{self._log_name}] slot query: {e}")
 
     async def _quiet_disconnect(self, addr: str) -> None:
         try:
