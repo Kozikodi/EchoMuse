@@ -11,6 +11,11 @@ This runs the real `aioesphomeapi` client against a real listener:
     wrong key   InvalidEncryptionKeyAPIError  (HA asks for the key again)
     no key      RequiresEncryptionAPIError    (HA asks for a key at all)
 
+and with --plain, a client that still holds a key against a listener that no
+longer has one (connections switched off again):
+
+    EncryptionPlaintextAPIError   (HA offers to drop the key)
+
 Two processes, because aioesphomeapi registers its own api.proto and ours is
 vendored from a different release: importing both in one interpreter collides
 in protobuf's descriptor pool.
@@ -38,7 +43,8 @@ def serve(key_hex: str) -> None:
     class Device(SatelliteServerProtocol):
         def __init__(self):
             super().__init__(server_name=NAME, log_name="check")
-            self.set_encryption(bytes.fromhex(key_hex), NAME, MAC)
+            if key_hex != "plain":
+                self.set_encryption(bytes.fromhex(key_hex), NAME, MAC)
 
         def handle_message(self, msg):
             if isinstance(msg, api_pb2.DeviceInfoRequest):
@@ -95,10 +101,36 @@ async def client(key: bytes) -> int:
     return failed
 
 
+async def plain_client(key: bytes) -> int:
+    """A client still holding a key meets a listener that no longer wants one."""
+    import aioesphomeapi
+    c = aioesphomeapi.APIClient("127.0.0.1", PORT, None,
+                                noise_psk=base64.b64encode(key).decode())
+    try:
+        await c.connect(login=True)
+        print("FAIL keyed client on a plaintext port: connected")
+        return 1
+    except Exception as e:
+        ok = "EncryptionPlaintext" in type(e).__name__
+        print("PASS" if ok else "FAIL",
+              f"keyed client on a plaintext port: {type(e).__name__}")
+        return 0 if ok else 1
+    finally:
+        await c.disconnect(force=True)
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--serve":
         serve(sys.argv[2])
         sys.exit(0)
+    if len(sys.argv) == 2 and sys.argv[1] == "--plain":
+        proc = subprocess.Popen([sys.executable, __file__, "--serve", "plain"],
+                                stdout=subprocess.PIPE, text=True)
+        try:
+            assert proc.stdout.readline().strip() == "listening"
+            sys.exit(asyncio.run(plain_client(os.urandom(32))))
+        finally:
+            proc.terminate()
     key = os.urandom(32)
     proc = subprocess.Popen([sys.executable, __file__, "--serve", key.hex()],
                             stdout=subprocess.PIPE, text=True)

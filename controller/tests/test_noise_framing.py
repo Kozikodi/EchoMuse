@@ -266,6 +266,10 @@ def test_a_plaintext_listener_is_unchanged():
     assert packets == [(1, b"hello"), (7, b"")]
     proto.send_packet(2, b"world")
     assert transport.written == encode_frame(2, b"world")
-    # And it still refuses an encrypted client rather than misreading it.
+    # And it refuses an encrypted client rather than misreading it — saying
+    # so in plaintext first, which is how Home Assistant learns the device no
+    # longer uses a key (ESPHome's firmware sends exactly these bytes).
+    transport.take()
     proto.data_received(frame(b""))
+    assert transport.written == b"\x00Bad indicator byte"
     assert transport.closed

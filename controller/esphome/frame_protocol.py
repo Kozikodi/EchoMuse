@@ -334,10 +334,17 @@ class PlaintextFrameProtocol(asyncio.Protocol):
         if preamble == _VARUINT_TOO_LONG:
             raise FrameProtocolError("preamble varuint exceeds byte limit")
         if preamble == 0x01:
+            # A client that holds an encryption key for a listener that has
+            # none — a Bluetooth proxy whose connections were switched off
+            # again. Answered as ESPHome's firmware answers it, a plaintext
+            # indicator and a reason, because that is what tells Home
+            # Assistant the device no longer uses encryption so it can offer
+            # to drop the key. Closing without a word reads as a dead device
+            # and it retries for ever (measured with its client, 2026-10-03).
+            if self._transport is not None and not self._transport.is_closing():
+                self._transport.write(b"\x00Bad indicator byte")
             raise FrameProtocolError(
-                "peer requested Noise-encrypted frame — this server is "
-                "plaintext-only (ESPHOME_SPEC.md §5 option (a))"
-            )
+                "peer sent an encrypted frame to a listener with no key")
         if preamble != 0x00:
             raise FrameProtocolError(f"invalid frame preamble 0x{preamble:02x}")
 
