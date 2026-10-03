@@ -16,6 +16,16 @@ Two processes, for the reason tools/noise_client_check.py gives.
 
     docker run --rm -v "$PWD":/c -w /c python:3.12 sh -c \\
       'pip install -q aioesphomeapi && python tools/gatt_client_check.py'
+
+With --real-proxy the listener is em_ble_proxy's own DeviceBleProxyServer
+rather than a bare one, so the check also covers what the suite cannot
+import: the encrypted satellite, its feature flags and the hand-off to
+em_ble_gatt. That needs the controller's dependencies, so run it in the
+controller image with this tree mounted over /app:
+
+    docker run --rm -v "$PWD":/app -w /app --entrypoint sh \\
+      ghcr.io/wilbowes/echomuse-controller:<tag> -c \\
+      'pip install -q aioesphomeapi && python tools/gatt_client_check.py --real-proxy'
 """
 import asyncio
 import base64
@@ -33,7 +43,7 @@ UUID_CUSTOM = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 CCCD = "00002902-0000-1000-8000-00805f9b34fb"
 
 
-def serve(key_hex: str) -> None:
+def serve(key_hex: str, real_proxy: bool = False) -> None:
     sys.path.insert(0, HERE)
     import em_ble_gatt as G
     from esphome.satellite_server import SatelliteServerProtocol, _HANDLED
@@ -99,6 +109,27 @@ def serve(key_hex: str) -> None:
                     self.slots()
 
     echo = Echo()
+
+    if real_proxy:
+        import em_ble_proxy
+
+        async def to_echo(device_id, payload):
+            return await echo.send(payload)
+
+        em_ble_proxy.set_gatt_sender(to_echo)
+        server = em_ble_proxy.DeviceBleProxyServer(
+            "G090LF0000000001", "Check", "02:EC:00:00:00:02", PORT, bytes.fromhex(key_hex))
+        echo.link = server.link
+        server.link.free, server.link.limit = 3, 3
+
+        async def main_real():
+            await server.start("127.0.0.1")
+            print("listening", flush=True)
+            await asyncio.Event().wait()
+
+        asyncio.run(main_real())
+        return
+
     link = G.GattLink(echo.send)
     echo.link = link
     link.free, link.limit = 3, 3
@@ -143,6 +174,8 @@ async def client(key: bytes) -> int:
                                 noise_psk=base64.b64encode(key).decode())
     await c.connect(login=True)
     info = await c.device_info()
+    print("device:", info.name, "| api_encryption_supported:",
+          getattr(info, "api_encryption_supported", "?"))
     flags = info.bluetooth_proxy_feature_flags_compat(c.api_version)
     check("feature flags offer connections",
           bool(flags & BluetoothProxyFeature.ACTIVE_CONNECTIONS))
@@ -212,11 +245,12 @@ async def client(key: bytes) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--serve":
-        serve(sys.argv[2])
+    if len(sys.argv) >= 3 and sys.argv[1] == "--serve":
+        serve(sys.argv[2], real_proxy="--real-proxy" in sys.argv)
         sys.exit(0)
     key = os.urandom(32)
-    proc = subprocess.Popen([sys.executable, __file__, "--serve", key.hex()],
+    proc = subprocess.Popen([sys.executable, __file__, "--serve", key.hex()]
+                            + [a for a in sys.argv[1:] if a == "--real-proxy"],
                             stdout=subprocess.PIPE, text=True)
     try:
         assert proc.stdout.readline().strip() == "listening"

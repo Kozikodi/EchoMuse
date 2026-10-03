@@ -189,6 +189,11 @@ class GattLink:
             if future is not None and not future.done():
                 future.set_result(msg)
             return
+        if kind == "slots" and "req" in msg:
+            # The answer to a slots query is the event itself, with the id.
+            future = self._pending.get(msg.get("req"))
+            if future is not None and not future.done():
+                future.set_result({"ok": True})
         asyncio.get_running_loop().call_soon(self._event, kind, msg)
 
     def _event(self, kind: str, msg: dict) -> None:

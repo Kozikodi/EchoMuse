@@ -102,6 +102,9 @@ class Echo:
                     self._slots()
             for step in ((event, result) if self.events_first else (result, event)):
                 step()
+        elif t == "slots":
+            self._emit(t="slots", req=n, free=3 - len(self.connected), limit=3,
+                       addrs=sorted(self.connected))
         elif addr not in self.connected:
             self._emit(t="result", req=n, ok=False, error="not_connected")
         elif t == "services":
@@ -201,6 +204,16 @@ def test_link_matches_results_to_requests_and_encodes_values():
         with pytest.raises(G.GattError) as e:
             await link.request("read", addr=A, handle=77)
         assert (e.value.code, e.value.att) == ("att", 1)
+    run(go())
+
+
+def test_a_slots_query_is_answered_by_the_slots_event():
+    async def go():
+        echo, link, *_ = setup()
+        echo.connected[A] = True          # a link the Echo already held
+        await link.request("slots", timeout=1.0)
+        await asyncio.sleep(0)
+        assert (link.free, link.limit, link.addrs) == (2, 3, {A})
     run(go())
 
 
