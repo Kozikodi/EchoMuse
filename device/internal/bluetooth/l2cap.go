@@ -22,6 +22,7 @@ const (
 	opLESetRandomAddr    = 0x08<<10 | 0x0005
 	opLECreateConn       = 0x08<<10 | 0x000D
 	opLECreateConnCancel = 0x08<<10 | 0x000E
+	opLEConnUpdate       = 0x08<<10 | 0x0013
 
 	cidATT   = 0x0004
 	cidLESig = 0x0005
@@ -140,6 +141,19 @@ func createConnParams(peer net.HardwareAddr, peerType, ownType, intervalMs int) 
 	binary.LittleEndian.PutUint16(p[15:17], iv)
 	binary.LittleEndian.PutUint16(p[17:19], 0)   // latency
 	binary.LittleEndian.PutUint16(p[19:21], 500) // supervision timeout, 10ms units
+	return p
+}
+
+// connUpdateParams builds LE Connection Update: a new interval for a link
+// that is up, with the same latency and supervision timeout it was made with.
+func connUpdateParams(handle uint16, intervalMs int) []byte {
+	iv := uint16(intervalMs * 100 / 125)
+	p := make([]byte, 14)
+	binary.LittleEndian.PutUint16(p[0:2], handle)
+	binary.LittleEndian.PutUint16(p[2:4], iv)
+	binary.LittleEndian.PutUint16(p[4:6], iv)
+	binary.LittleEndian.PutUint16(p[6:8], 0)    // latency
+	binary.LittleEndian.PutUint16(p[8:10], 500) // supervision timeout, 10ms units
 	return p
 }
 

@@ -50,6 +50,8 @@ type fakeCtl struct {
 	cancels    int
 	resets     int
 	connecting string
+	updates    []uint16      // every LE Connection Update's interval, 1.25ms units
+	updateLag  time.Duration // before an update completes
 }
 
 func newFakeCtl() *fakeCtl {
@@ -214,6 +216,19 @@ func (f *fakeCtl) command(op uint16, params []byte) {
 		handle := binary.LittleEndian.Uint16(params[0:2])
 		f.status(op, 0)
 		f.drop(handle, hciReasonLocalHost)
+	case opLEConnUpdate:
+		f.mu.Lock()
+		f.updates = append(f.updates, binary.LittleEndian.Uint16(params[2:4]))
+		lag := f.updateLag
+		f.mu.Unlock()
+		f.status(op, 0)
+		done := append([]byte{leSubeventConnUpdateDone, 0}, params[0:2]...)
+		done = append(done, params[2:4]...)
+		done = append(done, 0, 0, 0xF4, 0x01)
+		go func() {
+			time.Sleep(lag)
+			f.event(evtLEMeta, done...)
+		}()
 	default:
 		f.complete(op, 0)
 	}
@@ -784,4 +799,88 @@ func TestAdvertsStillFlowBesideALink(t *testing.T) {
 	} else if !errors.As(err, new(*ATTError)) {
 		t.Fatalf("link broke: %v", err)
 	}
+}
+
+func (f *fakeCtl) waitUpdates(t *testing.T, want []uint16) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f.mu.Lock()
+		got := append([]uint16(nil), f.updates...)
+		f.mu.Unlock()
+		if reflect.DeepEqual(got, want) {
+			return
+		}
+		if time.Now().After(deadline) || len(got) > len(want) {
+			t.Fatalf("connection updates %v, want %v", got, want)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func TestIdleLinkSlowsDownAndABusyOneSpeedsUp(t *testing.T) {
+	const fast, slow = 24, 400 // 30ms and 500ms in 1.25ms units
+	f := newFakeCtl()
+	p := f.peer(peerA)
+	name, _, _, _ := table(p.srv)
+	m := session(t, f, func(s *Scanner) { s.Conns().idleAfter = 60 * time.Millisecond }).Conns()
+	if _, err := m.Connect(peerA, 1); err != nil {
+		t.Fatal(err)
+	}
+	// Made fast, used for discovery, then left alone.
+	if _, err := m.Services(peerA); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	if len(f.updates) != 0 {
+		t.Fatalf("updated while in use: %v", f.updates)
+	}
+	f.mu.Unlock()
+	f.waitUpdates(t, []uint16{slow})
+
+	// The first request on a quiet link asks for the fast interval back, and
+	// goes out without waiting for it.
+	if _, err := m.Read(peerA, name); err != nil {
+		t.Fatal(err)
+	}
+	f.waitUpdates(t, []uint16{slow, fast})
+
+	// Kept busy, it stays fast: no update per request.
+	for end := time.Now().Add(150 * time.Millisecond); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if _, err := m.Read(peerA, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.waitUpdates(t, []uint16{slow, fast})
+	f.waitUpdates(t, []uint16{slow, fast, slow}) // and quiet again
+}
+
+func TestOneConnectionUpdateAtATime(t *testing.T) {
+	const fast, slow = 24, 400
+	f := newFakeCtl()
+	f.updateLag = 120 * time.Millisecond
+	p := f.peer(peerA)
+	name, _, _, _ := table(p.srv)
+	m := session(t, f, func(s *Scanner) { s.Conns().idleAfter = 40 * time.Millisecond }).Conns()
+	if _, err := m.Connect(peerA, 1); err != nil {
+		t.Fatal(err)
+	}
+	f.waitUpdates(t, []uint16{slow})
+	// Requests keep arriving while the move to slow is still in flight: none
+	// of them may issue a second update on top of it. The move back to fast
+	// follows once the first completes, and it is asked for once.
+	start := time.Now()
+	for time.Since(start) < 300*time.Millisecond {
+		if _, err := m.Read(peerA, name); err != nil {
+			t.Fatal(err)
+		}
+		f.mu.Lock()
+		n := len(f.updates)
+		f.mu.Unlock()
+		if time.Since(start) < 80*time.Millisecond && n != 1 {
+			t.Fatalf("%d updates while the first was in flight", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	f.waitUpdates(t, []uint16{slow, fast, slow})
 }

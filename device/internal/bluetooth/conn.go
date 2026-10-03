@@ -39,10 +39,24 @@ const (
 	// ones, which is what most peers ask for.
 	attClientMTU = 247
 
-	leConnIntervalMs = 30
-	leConnectTimeout = 20 * time.Second
-	attTxnTimeout    = 30 * time.Second // Vol 3 Part F 3.3.3
-	aclCreditTimeout = 5 * time.Second
+	// Two connection intervals, because the two things a link costs pull
+	// opposite ways (measured on a Dot, 2026-10-03). A request takes one to
+	// two intervals, so discovery wants a short one: 2s at 30ms, 16s at
+	// 200ms. But the scan shares the radio with the link, and at 30ms it
+	// caught 24% of the adverts it catches alone, against 54% at 200ms and
+	// 65% at 1s — which is Bermuda's presence data. So a link runs fast while
+	// it is being used and is moved to the slow interval once it goes quiet.
+	// WiFi does not enter into it: resends were the same at either.
+	//
+	// Speeding up again is not instant — the controller schedules an update
+	// six intervals ahead, 3s at 500ms — so the first requests after an idle
+	// spell go at the slow rate while it takes effect.
+	leConnIntervalMs     = 30
+	leConnIdleIntervalMs = 500
+	leConnIdleAfter      = 5 * time.Second
+	leConnectTimeout     = 20 * time.Second
+	attTxnTimeout        = 30 * time.Second // Vol 3 Part F 3.3.3
+	aclCreditTimeout     = 5 * time.Second
 
 	attMaxValueLen = 512 // Vol 3 Part F 3.2.9
 
@@ -82,6 +96,11 @@ type leConn struct {
 	mtu      int
 	unacked  int
 	services []Service
+	lastUse  time.Time // the last ATT request of ours
+	fast     bool      // the interval the link is running at
+	wantFast bool      // the one it should be
+	updating bool      // an LE Connection Update is in flight
+	askedFor bool      // what that update asked for
 }
 
 // ConnManager holds the links. The zero value is not usable; a Scanner makes
@@ -110,6 +129,7 @@ type ConnManager struct {
 
 	connectTimeout time.Duration
 	attTimeout     time.Duration
+	idleAfter      time.Duration
 }
 
 func newConnManager(hold func(bool)) *ConnManager {
@@ -117,6 +137,7 @@ func newConnManager(hold func(bool)) *ConnManager {
 		hold:           hold,
 		connectTimeout: leConnectTimeout,
 		attTimeout:     attTxnTimeout,
+		idleAfter:      leConnIdleAfter,
 	}
 }
 
@@ -219,10 +240,25 @@ func (m *ConnManager) Slots() (free, limit int) {
 
 func (m *ConnManager) run(h *hciHost, stop chan struct{}) {
 	var reasm aclReassembler
+	period := m.idleAfter / 2
+	if period > time.Second {
+		period = time.Second
+	}
+	idle := time.NewTicker(period)
+	defer idle.Stop()
 	for {
 		select {
 		case pkt := <-h.link:
 			m.handle(h, &reasm, pkt)
+		case now := <-idle.C:
+			m.mu.Lock()
+			for _, c := range m.conns {
+				if c.wantFast && now.Sub(c.lastUse) >= m.idleAfter {
+					c.wantFast = false
+					go m.applyInterval(h, c)
+				}
+			}
+			m.mu.Unlock()
 		case <-h.dead:
 			return
 		case <-stop:
@@ -316,12 +352,25 @@ func (m *ConnManager) handle(h *hciHost, reasm *aclReassembler, pkt []byte) {
 			m.onConnComplete(h, cc)
 			return
 		}
-		if len(pkt) >= 13 && pkt[3] == leSubeventConnUpdateDone && pkt[4] == 0 {
+		if len(pkt) >= 13 && pkt[3] == leSubeventConnUpdateDone {
 			// status(1), handle(2), interval(2), latency(2), timeout(2)
-			if c := m.byHandle(binary.LittleEndian.Uint16(pkt[5:7]) & 0x0FFF); c != nil {
-				m.mu.Lock()
+			c := m.byHandle(binary.LittleEndian.Uint16(pkt[5:7]) & 0x0FFF)
+			if c == nil {
+				return
+			}
+			m.mu.Lock()
+			if pkt[4] == 0 {
 				c.intervalMs = float64(binary.LittleEndian.Uint16(pkt[7:9])) * 1.25
-				m.mu.Unlock()
+				c.fast = c.askedFor
+			}
+			c.updating = false
+			again := c.wantFast != c.fast && pkt[4] == 0
+			interval := c.intervalMs
+			m.mu.Unlock()
+			log.Printf("[ble] %s connection update status 0x%02x, interval %.0fms", c.addr, pkt[4], interval)
+			if again {
+				// What was wanted changed while this one was in flight.
+				go m.applyInterval(h, c)
 			}
 		}
 	}
@@ -336,6 +385,7 @@ func (m *ConnManager) onConnComplete(h *hciHost, cc connComplete) {
 		m.conns[cc.handle] = &leConn{
 			addr: addr, handle: cc.handle, intervalMs: cc.intervalMs, mtu: attDefaultMTU,
 			rsp: make(chan []byte, 1), gone: make(chan struct{}),
+			lastUse: time.Now(), fast: true, wantFast: true,
 		}
 	}
 	m.mu.Unlock()
@@ -416,6 +466,33 @@ func (m *ConnManager) onL2CAP(h *hciHost, c *leConn, cid uint16, p []byte) {
 	}
 }
 
+// applyInterval moves a link to the interval it should be running at. One
+// update at a time per link; a change of mind while one is in flight is
+// picked up when it completes.
+func (m *ConnManager) applyInterval(h *hciHost, c *leConn) {
+	m.mu.Lock()
+	if c.updating || c.wantFast == c.fast || m.conns[c.handle] != c {
+		m.mu.Unlock()
+		return
+	}
+	c.updating, c.askedFor = true, c.wantFast
+	ms := leConnIdleIntervalMs
+	if c.wantFast {
+		ms = leConnIntervalMs
+	}
+	m.mu.Unlock()
+	if _, err := h.Cmd(opLEConnUpdate, connUpdateParams(c.handle, ms)); err != nil {
+		m.mu.Lock()
+		c.updating = false
+		m.mu.Unlock()
+		select {
+		case <-c.gone:
+		default:
+			log.Printf("[ble] %s: connection update to %dms: %v", c.addr, ms, err)
+		}
+	}
+}
+
 // setMTU records the peer's receive MTU; the link runs at the smaller of the
 // two sides', and never below the default.
 func (m *ConnManager) setMTU(c *leConn, peer uint16) {
@@ -470,6 +547,14 @@ func (m *ConnManager) request(c *leConn, req []byte) ([]byte, error) {
 	}
 	c.txn.Lock()
 	defer c.txn.Unlock()
+	m.mu.Lock()
+	c.lastUse = time.Now()
+	speedUp := !c.wantFast
+	c.wantFast = true
+	m.mu.Unlock()
+	if speedUp {
+		go m.applyInterval(h, c)
+	}
 	select {
 	case <-c.rsp: // a late answer to an abandoned request
 	default:

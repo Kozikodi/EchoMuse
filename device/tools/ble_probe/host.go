@@ -89,10 +89,10 @@ func runHost(peers string, hold int, write string) {
 	}
 	free, limit := m.Slots()
 	fmt.Printf("slots %d/%d free; holding %ds with the scan running\n", free, limit, hold)
-	before := adverts
+	before, seen := adverts, sc.Stats().AdvertsSeen
 	time.Sleep(time.Duration(hold) * time.Second)
 	st := sc.Stats()
-	fmt.Printf("adverts batched during hold: %d (seen %d total, restarts %d, hci errors %d)\n", adverts-before, st.AdvertsSeen, st.Restarts, st.HciErrors)
+	fmt.Printf("during hold: %d adverts seen, %d batched (restarts %d, hci errors %d)\n", st.AdvertsSeen-seen, adverts-before, st.Restarts, st.HciErrors)
 	for _, addr := range up {
 		fmt.Printf("%s: disconnect: %v\n", addr, m.Disconnect(addr))
 	}
