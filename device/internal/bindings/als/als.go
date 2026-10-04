@@ -31,6 +31,22 @@
 // right for the hardware it names, and reaching the other batch means reading
 // the IIO sensor too, not loosening this match to a "tsl" prefix.
 //
+// The 2584 batch is read through IIO (resolveIIO), and ONLY through
+// illuminance0_input. Its sibling `calibrated_lux` CORRUPTS THE KERNEL HEAP on
+// every read: Amazon's tsl2583.c parse_alscal_idme() kstrdup()s the idme
+// calibration string, advances the pointer twice with strsep(), then kfree()s
+// the ADVANCED pointer — the middle of a slab object. The panic lands later,
+// in whatever process next touches the damaged slab (on #90 it was the shell
+// exiting, in anon_vma_interval_tree_remove, with the alscal text sitting in
+// the corrupted memory), which is why "reading the sensor crashes the Dot"
+// took 1 to 5 reads and looked like the sensor itself. illuminance0_input goes
+// through taos_lux_show → taos_get_lux and frees correctly: 30 consecutive
+// reads on a G090LF107 unit, no panic, 25 → 0 under a hand, 2026-10-04.
+// calibrated_lux is only 400·lux/coeff clamped to 400, with coeff from the
+// same idme string, so it is recomputed here (calibrationScale) — unclamped,
+// and without the kfree. ygelfand/echolocal reached the same rule
+// independently. Never read calibrated_lux, not even once to "check".
+//
 // Do NOT try to force the driver on via /sys/bus/i2c/drivers/tsl2540/unbind.
 // It succeeds and leaves every als_* attribute in place; the next read enters
 // a show() handler whose driver data is gone and hangs the device hard enough
@@ -44,6 +60,7 @@ package als
 import (
 	"context"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -61,9 +78,28 @@ const driverName = "tsl2540"
 // sensor, not about the cost of any single scan.
 const RetryInterval = 30 * time.Second
 
-// i2cGlob is where the bus is enumerated. A variable only so the tests can
-// point it at a fixture directory — nothing reassigns it at runtime.
-var i2cGlob = "/sys/bus/i2c/devices/*/name"
+// iioName is the IIO `name` of the second-sourced ALS (#90). The IIO core
+// takes it from the i2c client name, so it is the same board-file string.
+const iioName = "tsl2584tsv"
+
+// iioAttr is the one attribute of that device that is safe to read. See the
+// package comment: its neighbour calibrated_lux corrupts the kernel heap.
+const iioAttr = "illuminance0_input"
+
+// Where things are found. Variables only so the tests can point them at a
+// fixture directory — nothing reassigns them at runtime.
+var (
+	i2cGlob = "/sys/bus/i2c/devices/*/name"
+	iioGlob = "/sys/bus/iio/devices/iio:device*/name"
+	// alscalPaths hold the per-unit factory calibration, the same string
+	// the 2584 driver reads. The device tree copy is the one the kernel
+	// itself uses; /proc/idme is Amazon's export of it.
+	alscalPaths = []string{"/proc/device-tree/idme/alscal/value", "/proc/idme/alscal"}
+)
+
+// calRefLux is the reference level in the idme calibration: the factory
+// recorded what the sensor read under 400 lux (`ams_400_0=`).
+const calRefLux = 400
 
 // Status codes. Stable identifiers, because the controller and dashboard key
 // off them; the human-readable part rides in Detail.
@@ -75,12 +111,10 @@ const (
 	// unfamiliar kernel rather than a missing part, and has not been seen
 	// in the field.
 	StatusNoChip = "no_chip"
-	// StatusNoAttribute — the name is listed but no als_lux appeared, so the
-	// driver's probe found nothing to talk to. This is the ordinary reading
-	// for a batch that was fitted the OTHER ALS (#90) — the Detail text
-	// calls it an unbound driver, which reads as our fault and is not; it is
-	// corrected alongside the IIO fallback rather than on its own, so the
-	// wording changes once, with the behaviour it describes.
+	// StatusNoAttribute — the tsl2540 name is listed but no als_lux
+	// appeared, AND no tsl2584tsv answered on IIO either. With the IIO
+	// fallback in place a batch fitted the other ALS (#90) resolves as ok,
+	// so this now means neither part answered.
 	StatusNoAttribute = "no_attribute"
 	// StatusUnknown — the bus could not be enumerated. Distinct from
 	// "nothing found", which is a positive result.
@@ -110,7 +144,8 @@ type Status struct {
 
 var (
 	mu       sync.Mutex
-	path     string    // absolute path to als_lux; empty when unresolved
+	path     string    // absolute path to als_lux or illuminance0_input; empty when unresolved
+	scale    = 1.0     // multiplier taking the raw reading to lux; 1 for the tsl2540
 	lastScan time.Time // when we last looked, for the retry interval
 	reported bool      // absence logged once, not every retry
 	status   = Status{Code: StatusUnknown, Detail: "i2c bus not scanned yet"}
@@ -183,9 +218,18 @@ func resolve() string {
 		}
 	}
 	if found != "" {
-		path = found
+		path, scale = found, 1
 		status = Status{Code: StatusOK, Path: found, Seen: seen}
 		log.Printf("[als] ambient light sensor at %s", path)
+		return path
+	}
+	// The other batch (#90): a tsl2584tsv answering through IIO. Looked for
+	// only after the 2540 fails, so devices that work today are untouched.
+	if p := resolveIIO(); p != "" {
+		s, detail := calibrationScale()
+		path, scale = p, s
+		status = Status{Code: StatusOK, Path: p, Detail: detail, Seen: seen}
+		log.Printf("[als] ambient light sensor at %s (%s)", path, detail)
 		return path
 	}
 	// Record the verdict on EVERY scan, not only the first. The log line
@@ -193,9 +237,10 @@ func resolve() string {
 	// report an old answer for a device whose bus has since changed.
 	if nameMatched {
 		status = Status{
-			Code:   StatusNoAttribute,
-			Detail: driverName + " is on the i2c bus but exposes no als_lux attribute — the driver has not bound",
-			Seen:   seen,
+			Code: StatusNoAttribute,
+			Detail: driverName + " is on the i2c bus but exposes no als_lux attribute, and no " +
+				iioName + " answered on IIO — neither light sensor responded",
+			Seen: seen,
 		}
 	} else {
 		status = Status{
@@ -210,14 +255,95 @@ func resolve() string {
 		// controller, so name which one it is: no chip on the bus at all,
 		// versus the chip present with no driver attribute bound to it.
 		if nameMatched {
-			log.Printf("[als] %s found but no als_lux attribute — driver not bound; "+
-				"ambient light unavailable", driverName)
+			log.Printf("[als] %s found but no als_lux attribute, and no %s on IIO; "+
+				"ambient light unavailable", driverName, iioName)
 		} else {
 			log.Printf("[als] no %s on i2c (saw: %s) — ambient light unavailable, "+
 				"rechecking every %s", driverName, strings.Join(seen, ","), RetryInterval)
 		}
 	}
 	return ""
+}
+
+// resolveIIO finds the tsl2584tsv's illuminance0_input, by name for the same
+// reason resolve() matches the 2540 by name: iio:device0 is an enumeration
+// accident. Called with mu held.
+//
+// Unlike the i2c listing, an IIO device only exists once a driver's probe has
+// succeeded, so finding one IS evidence of the part — on the 2540 batch
+// /sys/bus/iio/devices/ is empty. The attribute is still stat()ed, never read
+// here; the first read is Lux()'s.
+func resolveIIO() string {
+	names, err := filepath.Glob(iioGlob)
+	if err != nil {
+		return ""
+	}
+	for _, n := range names {
+		b, err := os.ReadFile(n)
+		if err != nil || strings.TrimSpace(string(b)) != iioName {
+			continue
+		}
+		p := filepath.Join(filepath.Dir(n), iioAttr)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// calibrationScale returns the multiplier that does what the driver's
+// calibrated_lux would, without calling it (see the package comment), plus a
+// sentence for the status Detail.
+//
+// The driver computes 400·lux/coeff, where coeff is the INTEGER part of the
+// second field of `ams_400_0=<ch0>,<reading>,<ch1>` in the unit's idme
+// calibration — the reading the factory got under 400 lux. Matched exactly,
+// including the truncation, so the number agrees with what the driver's own
+// attribute would have said below its 400 lux clamp. Measured on a G090LF107:
+// ` ams_0_0=0,0.000,0 ams_400_0=266,306.000,36`, coeff 306.
+//
+// With no usable calibration the raw reading is reported at scale 1. It still
+// tracks the room, so a degraded number beats no sensor; the Detail says so.
+func calibrationScale() (float64, string) {
+	for _, p := range alscalPaths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if coeff, ok := parseAlscal(string(b)); ok {
+			return float64(calRefLux) / float64(coeff),
+				iioName + " via IIO, calibrated against idme alscal (" + strconv.Itoa(coeff) + " at 400 lux)"
+		}
+	}
+	return 1, iioName + " via IIO, uncalibrated — no usable idme alscal"
+}
+
+// parseAlscal extracts the driver's coeff from an idme alscal string. Pure,
+// so the parse is tested against real strings without a device.
+//
+// procfs and the device tree both NUL-terminate, and the value starts with a
+// space; tokenising on whitespace and NUL takes both in its stride.
+func parseAlscal(s string) (int, bool) {
+	for _, tok := range strings.FieldsFunc(s, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == 0
+	}) {
+		v, ok := strings.CutPrefix(tok, "ams_400_0=")
+		if !ok {
+			continue
+		}
+		f := strings.Split(v, ",")
+		if len(f) < 2 {
+			return 0, false
+		}
+		whole, _, _ := strings.Cut(f[1], ".")
+		coeff, err := strconv.Atoi(whole)
+		// The driver refuses a zero coeff too (it would divide by it).
+		if err != nil || coeff <= 0 {
+			return 0, false
+		}
+		return coeff, true
+	}
+	return 0, false
 }
 
 // Present reports whether this device has a readable ambient light sensor.
@@ -258,6 +384,12 @@ func Lux() *int {
 	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil {
 		return nil
+	}
+	mu.Lock()
+	s := scale
+	mu.Unlock()
+	if s != 1 {
+		n = int(math.Round(float64(n) * s))
 	}
 	return &n
 }
